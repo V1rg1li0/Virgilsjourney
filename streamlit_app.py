@@ -1,5 +1,8 @@
+
 from __future__ import annotations
 
+import truststore
+truststore.inject_into_ssl()
 
 from datetime import date, datetime, timedelta
 import pandas as pd
@@ -26,6 +29,10 @@ div[data-testid="stMetric"]{background:white;border:1px solid #E9EAF1;padding:12
 .stButton>button{border-radius:14px;font-weight:800;min-height:44px}
 .stTextInput input,.stNumberInput input,.stDateInput input{border-radius:12px}
 @media (max-width:640px){.block-container{padding-left:.75rem;padding-right:.75rem}.vj-title{font-size:26px}}
+/* Navegacion principal siempre visible */
+div[data-testid="stTabs"] button[role="tab"]{font-weight:800;font-size:14px;padding:.65rem .85rem;}
+div[data-testid="stTabs"]{margin-top:.35rem;margin-bottom:.6rem;}
+@media (max-width:640px){div[data-testid="stTabs"] button[role="tab"]{font-size:12px;padding:.55rem .5rem;}}
 </style>
 """, unsafe_allow_html=True)
 
@@ -143,7 +150,6 @@ def weekly_due(df: pd.DataFrame) -> bool:
 
 
 def dashboard(sb, uid, profile, measurements):
-    hero()
     if measurements.empty:
         st.warning("No hay mediciones. Registra una para comenzar.")
         return
@@ -291,64 +297,22 @@ def settings_page(sb, uid, profile):
 
 
 # --- app ---
-# Inicializa las claves de sesión para evitar KeyError en reruns parciales
-for _key in ["access_token", "refresh_token", "user_id", "email"]:
-    st.session_state.setdefault(_key, None)
+# Inicializar estado de sesión para evitar KeyError en reruns parciales
+for key in ["access_token", "refresh_token", "user_id", "email"]:
+    if key not in st.session_state:
+        st.session_state[key] = None
 
-
-def ensure_authenticated_session() -> bool:
-    """Valida la sesión y recupera user_id/email si faltan."""
-    access_token = st.session_state.get("access_token")
-    refresh_token = st.session_state.get("refresh_token")
-
-    if not access_token:
-        return False
-
-    # Si ya tenemos el usuario completo, no hacemos llamadas extra
-    if st.session_state.get("user_id"):
-        return True
-
-    # Hay token, pero falta user_id: reconstruimos la sesión desde Supabase
-    try:
-        sb_tmp = client()
-
-        # client() ya intenta set_session(access, refresh). Si refresh_token
-        # también existe, get_user() puede recuperar el usuario autenticado.
-        if access_token and refresh_token:
-            sb_tmp.auth.set_session(access_token, refresh_token)
-
-        user_response = sb_tmp.auth.get_user()
-        user = getattr(user_response, "user", None)
-
-        if user and getattr(user, "id", None):
-            st.session_state["user_id"] = user.id
-            st.session_state["email"] = getattr(user, "email", "") or ""
-            return True
-
-    except Exception:
-        pass
-
-    # Si no pudimos reconstruirla, limpiamos la sesión incompleta
-    for _key in ["access_token", "refresh_token", "user_id", "email"]:
-        st.session_state.pop(_key, None)
-
-    return False
-
-
-if not ensure_authenticated_session():
+if not st.session_state.get("access_token") or not st.session_state.get("user_id"):
     auth_screen()
-    st.stop()
 
-# Usuario autenticado
 sb = client()
 uid = st.session_state.get("user_id")
-email = st.session_state.get("email", "") or ""
+email = st.session_state.get("email", "")
 
 if not uid:
-    st.error("No fue posible recuperar la sesión. Vuelve a iniciar sesión.")
-    for _key in ["access_token", "refresh_token", "user_id", "email"]:
-        st.session_state.pop(_key, None)
-    st.stop()
+    st.session_state["access_token"] = None
+    st.session_state["refresh_token"] = None
+    auth_screen()
 
 profile = get_profile(sb, uid)
 if not profile:
@@ -357,18 +321,24 @@ if not profile:
 
 measurements = load_measurements(sb, uid)
 
-page = st.radio(
-    "",
-    ["Inicio", "Medición", "Nutrición", "Ajustes"],
-    horizontal=True,
-    label_visibility="collapsed",
-)
+# Encabezado global + navegación visible en formato móvil
+hero()
 
-if page == "Inicio":
+tab_inicio, tab_medicion, tab_nutricion, tab_ajustes = st.tabs([
+    "🏠 Inicio",
+    "📏 Medición",
+    "🥗 Nutrición",
+    "⚙️ Ajustes",
+])
+
+with tab_inicio:
     dashboard(sb, uid, profile, measurements)
-elif page == "Medición":
+
+with tab_medicion:
     measurement_form(sb, uid, measurements)
-elif page == "Nutrición":
+
+with tab_nutricion:
     nutrition_page(sb, uid, profile, measurements)
-else:
+
+with tab_ajustes:
     settings_page(sb, uid, profile)
