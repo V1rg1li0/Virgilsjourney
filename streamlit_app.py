@@ -1632,6 +1632,12 @@ def nutrition_page(sb, uid, profile, measurements):
 def settings_page(sb, uid, profile):
     st.markdown("## Ajustes")
 
+    # Siempre recargar el perfil desde Supabase para mostrar los datos más recientes.
+    fresh_profile = get_profile(sb, uid) or profile or {}
+
+    # ------------------------------------------------------------------
+    # GUÍA RÁPIDA
+    # ------------------------------------------------------------------
     st.markdown("### Guía rápida")
     st.caption("Puedes volver a ver el recorrido inicial cuando quieras.")
     if st.button("Ver guía rápida", key="open_quick_guide", use_container_width=True):
@@ -1639,47 +1645,166 @@ def settings_page(sb, uid, profile):
         st.session_state["vj_replay_guide_step"] = 0
         st.rerun()
 
-    current_preferred_name = preferred_name(profile)
+    current_preferred_name = preferred_name(fresh_profile)
 
     if st.session_state.get("vj_show_quick_guide", False):
-        quick_guide(new_user=False, key_prefix="vj_replay_guide", user_name=current_preferred_name)
+        quick_guide(
+            new_user=False,
+            key_prefix="vj_replay_guide",
+            user_name=current_preferred_name,
+        )
         st.divider()
 
-    with st.form("settings"):
-        st.markdown("### Tu identidad en Virgils Journey")
-        full_name = st.text_input("Tu nombre", value=str(profile.get("full_name") or ""), max_chars=80)
+    # ------------------------------------------------------------------
+    # IDENTIDAD - FORMULARIO INDEPENDIENTE
+    # ------------------------------------------------------------------
+    st.markdown("### Tu identidad en Virgils Journey")
+    st.caption(
+        "Puedes cambiar tu nombre o elegir un seudónimo. "
+        "El seudónimo tendrá prioridad en los saludos de la aplicación."
+    )
+
+    with st.form("identity_settings_form", clear_on_submit=False):
+        full_name = st.text_input(
+            "Tu nombre",
+            value=str(fresh_profile.get("full_name") or ""),
+            max_chars=80,
+            placeholder="Ej.: Virgilio Soto",
+        )
         display_name = st.text_input(
             "Seudónimo o nombre preferido (opcional)",
-            value=str(profile.get("display_name") or ""),
+            value=str(fresh_profile.get("display_name") or ""),
             max_chars=40,
-            help="Si lo dejas vacío, Virgils Journey usará tu nombre.",
+            placeholder="Ej.: Virgil",
+            help="Si escribes uno, Virgils Journey usará este nombre para hablarte.",
         )
-        goal = st.number_input("Meta de peso (kg)", 35.0, 300.0, float(profile["goal_weight_kg"]), 0.1)
-        reminder = st.selectbox("Día de recordatorio", WEEKDAYS, index=int(profile.get("reminder_weekday") or 0))
-        activity = st.selectbox("Actividad", ["Sedentario","Ligero","Moderado","Alto","Muy alto"], index=["Sedentario","Ligero","Moderado","Alto","Muy alto"].index(profile.get("activity_level") or "Sedentario"))
-        ok = st.form_submit_button("Guardar")
-    if ok:
-        clean_full_name = full_name.strip()
-        clean_display_name = display_name.strip()
+        save_identity = st.form_submit_button(
+            "💾 Guardar nombre y seudónimo",
+            use_container_width=True,
+            type="primary",
+        )
+
+    if save_identity:
+        clean_full_name = str(full_name or "").strip()
+        clean_display_name = str(display_name or "").strip()
+
         if not clean_full_name:
-            st.warning("El nombre no puede quedar vacío.")
+            st.error("Debes ingresar tu nombre antes de guardar.")
         else:
+            try:
+                sb.table("profiles").update({
+                    "full_name": clean_full_name,
+                    "display_name": clean_display_name or None,
+                }).eq("user_id", uid).execute()
+
+                # Actualizar también la sesión para que el cambio se refleje inmediatamente.
+                st.session_state["vj_full_name"] = clean_full_name
+                st.session_state["vj_display_name"] = clean_display_name
+                st.session_state["vj_preferred_name"] = clean_display_name or clean_full_name
+
+                # Verificar que Supabase realmente haya persistido los valores.
+                updated_profile = get_profile(sb, uid)
+                if not updated_profile:
+                    st.error("No pude verificar el perfil después de guardar.")
+                else:
+                    saved_full_name = str(updated_profile.get("full_name") or "").strip()
+                    saved_display_name = str(updated_profile.get("display_name") or "").strip()
+
+                    if saved_full_name != clean_full_name or saved_display_name != clean_display_name:
+                        st.error(
+                            "Supabase no devolvió los nuevos datos. Revisa que las columnas "
+                            "full_name y display_name existan y que la política RLS permita UPDATE."
+                        )
+                    else:
+                        st.toast(
+                            f"Guardado. Desde ahora te llamaré {saved_display_name or saved_full_name}.",
+                            icon="✅",
+                        )
+                        st.rerun()
+            except Exception as e:
+                st.error(f"No fue posible guardar el nombre o seudónimo: {e}")
+
+    st.divider()
+
+    # ------------------------------------------------------------------
+    # PREFERENCIAS - FORMULARIO INDEPENDIENTE
+    # ------------------------------------------------------------------
+    st.markdown("### Preferencias")
+
+    with st.form("settings_preferences_form", clear_on_submit=False):
+        goal = st.number_input(
+            "Meta de peso (kg)",
+            35.0,
+            300.0,
+            float(fresh_profile.get("goal_weight_kg") or 80.0),
+            0.1,
+        )
+
+        reminder_index = int(fresh_profile.get("reminder_weekday") or 0)
+        if reminder_index < 0 or reminder_index >= len(WEEKDAYS):
+            reminder_index = 0
+
+        reminder = st.selectbox(
+            "Día de recordatorio",
+            WEEKDAYS,
+            index=reminder_index,
+        )
+
+        activity_options = ["Sedentario", "Ligero", "Moderado", "Alto", "Muy alto"]
+        current_activity = fresh_profile.get("activity_level") or "Sedentario"
+        if current_activity not in activity_options:
+            current_activity = "Sedentario"
+
+        activity = st.selectbox(
+            "Actividad",
+            activity_options,
+            index=activity_options.index(current_activity),
+        )
+
+        save_preferences = st.form_submit_button(
+            "💾 Guardar preferencias",
+            use_container_width=True,
+        )
+
+    if save_preferences:
+        try:
             sb.table("profiles").update({
-                "full_name": clean_full_name,
-                "display_name": clean_display_name or None,
                 "goal_weight_kg": float(goal),
                 "reminder_weekday": WEEKDAYS.index(reminder),
                 "activity_level": activity,
-            }).eq("user_id",uid).execute()
-            st.success(f"Ajustes guardados. Te llamaré {clean_display_name or clean_full_name}.")
+            }).eq("user_id", uid).execute()
+
+            st.toast("Preferencias guardadas.", icon="✅")
             st.rerun()
+        except Exception as e:
+            st.error(f"No fue posible guardar las preferencias: {e}")
+
+    # ------------------------------------------------------------------
+    # INFORMACIÓN
+    # ------------------------------------------------------------------
     st.markdown("### Metodología")
-    st.write("La proyección se activa con al menos 4 mediciones distribuidas en ~4 semanas. Usa una tendencia robusta de peso (mediana de pendientes entre pares de puntos), y se actualiza con hasta las últimas 8 mediciones.")
-    st.write("El rango de 1–2 lb/semana se muestra solo como referencia de pérdida gradual citada por CDC. La fecha objetivo es una estimación y puede cambiar por líquidos, adherencia, enfermedad, medicamentos, sueño y otros factores.")
-    st.write("La proyección por hábitos es secundaria: utiliza calorías registradas, pasos y minutos de fuerza para estimar el balance energético. El peso observado sigue siendo la referencia principal porque el gasto y la ingesta tienen error de estimación.")
+    st.write(
+        "La proyección se activa con al menos 4 mediciones distribuidas en ~4 semanas. "
+        "Usa una tendencia robusta de peso (mediana de pendientes entre pares de puntos), "
+        "y se actualiza con hasta las últimas 8 mediciones."
+    )
+    st.write(
+        "El rango de 1–2 lb/semana se muestra solo como referencia de pérdida gradual citada por CDC. "
+        "La fecha objetivo es una estimación y puede cambiar por líquidos, adherencia, enfermedad, "
+        "medicamentos, sueño y otros factores."
+    )
+    st.write(
+        "La proyección por hábitos es secundaria: utiliza calorías registradas, pasos y minutos de fuerza "
+        "para estimar el balance energético. El peso observado sigue siendo la referencia principal porque "
+        "el gasto y la ingesta tienen error de estimación."
+    )
 
     st.markdown("### Privacidad")
-    st.caption("Las mediciones y fotos se asocian a tu usuario. Las fotos se guardan en un bucket privado de Supabase y se muestran con enlaces temporales. Evita subir imágenes que no quieras conservar en el servicio.")
+    st.caption(
+        "Las mediciones y fotos se asocian a tu usuario. Las fotos se guardan en un bucket privado "
+        "de Supabase y se muestran con enlaces temporales. Evita subir imágenes que no quieras "
+        "conservar en el servicio."
+    )
 
     support_card()
 
