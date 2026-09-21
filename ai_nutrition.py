@@ -332,11 +332,42 @@ def _daily_guidance_prompt(context: dict[str, Any]) -> str:
         for m in meals
     ) or "- Aún no hay comidas registradas."
 
+    consumed = float(context.get("consumed_kcal") or 0)
+    expenditure = float(context.get("expenditure_kcal") or 0)
+    calorie_target = float(context.get("calorie_target_kcal") or 0)
+    target_deficit = float(context.get("target_deficit_kcal") or 0)
+    energy_deficit = expenditure - consumed
+    intake_gap = calorie_target - consumed
+    deficit_vs_target = energy_deficit - target_deficit
+
+    if energy_deficit >= 0:
+        energy_label = f"Déficit energético estimado: {energy_deficit:.0f} kcal"
+    else:
+        energy_label = f"Superávit energético estimado: {abs(energy_deficit):.0f} kcal"
+
+    if intake_gap >= 0:
+        intake_label = f"Faltan {intake_gap:.0f} kcal para alcanzar la ingesta objetivo del día"
+    else:
+        intake_label = f"La ingesta supera el objetivo del día en {abs(intake_gap):.0f} kcal"
+
+    if deficit_vs_target >= 0:
+        deficit_label = f"El déficit estimado está {deficit_vs_target:.0f} kcal por encima del déficit objetivo"
+    else:
+        deficit_label = f"El déficit estimado está {abs(deficit_vs_target):.0f} kcal por debajo del déficit objetivo"
+
     return f"""
 Eres el coach nutricional de Virgils Journey. Analiza el día ACTUAL con los datos
 ya calculados por la aplicación y entrega recomendaciones concretas, sostenibles y accionables.
 No diagnostiques ni sustituyas consejo médico. No propongas ayunos extremos,
 castigos con ejercicio ni compensaciones agresivas después de comer de más.
+
+DEFINICIONES OBLIGATORIAS DE TERMINOLOGÍA
+- Déficit energético = gasto estimado - calorías consumidas. Si es positivo, hay DÉFICIT CALÓRICO.
+- Superávit energético = calorías consumidas - gasto estimado. Solo existe si el consumo supera al gasto.
+- Ingesta objetivo = presupuesto calórico del día. Estar por debajo de esa ingesta NO es un "excedente calórico".
+- Si el déficit real supera al déficit objetivo, dilo como "déficit mayor al objetivo" o "déficit más alto de lo planificado".
+- Si se consumió más que la ingesta objetivo pero todavía menos que el gasto, di "ingesta por sobre el objetivo", NO "superávit calórico".
+- PROHIBIDO usar "excedente calórico" cuando calorías consumidas < gasto estimado.
 
 DATOS DEL DÍA
 - Hora local actual: {context.get('current_local_time','')}
@@ -344,15 +375,16 @@ DATOS DEL DÍA
 - Rango habitual de comidas: {context.get('meal_window_start','08:00')}–{context.get('meal_window_end','21:00')}
 - Estado respecto al rango: {context.get('meal_window_status','within')}
 - Porcentaje aproximado transcurrido de la ventana: {context.get('meal_window_elapsed_pct',0):.0f}%
-- Calorías consumidas: {context.get('consumed_kcal',0):.0f} kcal
+- Calorías consumidas: {consumed:.0f} kcal
 - Proteína consumida: {context.get('protein_g',0):.0f} g
 - Carbohidratos consumidos: {context.get('carbs_g',0):.0f} g
 - Grasas consumidas: {context.get('fat_g',0):.0f} g
-- Gasto estimado: {context.get('expenditure_kcal',0):.0f} kcal
-- Balance aparente hasta este momento: {context.get('apparent_deficit_so_far',0):+.0f} kcal
-- Déficit objetivo: {context.get('target_deficit_kcal',0):.0f} kcal
-- Presupuesto calórico del día: {context.get('calorie_target_kcal',0):.0f} kcal
-- Calorías aproximadas disponibles: {context.get('remaining_kcal',0):.0f} kcal
+- Gasto estimado: {expenditure:.0f} kcal
+- {energy_label}
+- Déficit objetivo: {target_deficit:.0f} kcal
+- Presupuesto/ingesta objetivo del día: {calorie_target:.0f} kcal
+- {intake_label}
+- {deficit_label}
 - Meta de proteína orientativa: {context.get('protein_target_g',0):.0f} g
 - Proteína faltante aproximada: {context.get('remaining_protein_g',0):.0f} g
 - Pasos: {context.get('steps',0)}
@@ -367,22 +399,23 @@ REGLAS
 2. Si el estado es "before", NO marques pocas calorías como problema: la ventana aún no comienza.
 3. Si el estado es "within", habla del balance "hasta este momento". Indica QUÉ conviene comer después para acercarse al déficit objetivo sin quedar excesivamente bajo.
 4. Si el estado es "after", evalúa el cierre del día. Si el déficit real es mucho mayor al objetivo y el registro parece completo, recomienda aumentar energía y calidad nutricional al día siguiente; no presentes un déficit extremo como logro.
-5. Si el usuario superó el presupuesto calórico, NO recomiendes saltarse comidas, ayunar más ni "quemarlo" con ejercicio. Indica que mañana conviene volver al objetivo normal, moderar alimentos muy densos en calorías y priorizar proteína magra, verduras, fruta, legumbres/cereales integrales y agua.
-6. Si el usuario quedó muy por debajo del objetivo, recomienda completar con alimentos concretos y sostenibles, priorizando proteína, fibra y una fuente razonable de carbohidratos y grasas saludables.
-7. Si está cerca del objetivo, refuerza la conducta y sugiere una comida que complete micronutrientes/proteína sin desbalancear el día.
-8. Da 2 o 3 opciones concretas de próxima comida cuando todavía corresponda comer hoy. Cada una debe incluir kcal y proteína aproximadas.
-9. Genera SIEMPRE una receta de almuerzo para mañana basada en lo que comió hoy: debe aportar variedad y compensar nutricionalmente carencias probables, no "castigar" excesos. Debe ser fácil de conseguir/preparar en Chile/Latinoamérica.
-10. La receta de mañana debe incluir nombre, ingredientes con cantidades simples, preparación en 3 a 5 pasos, kcal y proteína aproximadas.
-11. El campo action_message debe ser directo: por ejemplo "Hoy aún te conviene comer...", "Hoy estás cerca del objetivo..." o "Hoy superaste el presupuesto; mañana vuelve a tu objetivo normal y prioriza...".
-12. No uses lenguaje culpabilizante. Habla de consistencia semanal y sostenibilidad.
-13. Sé concreto y accionable.
-14. Devuelve SOLO JSON válido, sin markdown.
+5. Si el usuario superó la ingesta objetivo, NO recomiendes saltarse comidas, ayunar más ni "quemarlo" con ejercicio. Si aun así su consumo quedó por debajo del gasto, aclara que sigue existiendo déficit energético aunque la ingesta haya superado el objetivo.
+6. Si existe superávit energético real (consumo > gasto), recomienda simplemente volver al objetivo habitual al día siguiente, sin compensaciones extremas.
+7. Si el usuario quedó muy por debajo de la ingesta objetivo, recomienda completar con alimentos concretos y sostenibles, priorizando proteína, fibra, carbohidratos de buena calidad y grasas saludables.
+8. Si está cerca del objetivo, refuerza la conducta y sugiere una comida que complete micronutrientes/proteína sin desbalancear el día.
+9. Da 2 o 3 opciones concretas de próxima comida cuando todavía corresponda comer hoy. Cada una debe incluir kcal y proteína aproximadas.
+10. Genera SIEMPRE una receta de almuerzo para mañana basada en lo que comió hoy: debe aportar variedad y compensar nutricionalmente carencias probables, no "castigar" excesos. Debe ser fácil de conseguir/preparar en Chile/Latinoamérica.
+11. La receta de mañana debe incluir nombre, ingredientes con cantidades simples, preparación en 3 a 5 pasos, kcal y proteína aproximadas.
+12. El campo action_message debe ser directo: "Hoy aún te conviene comer...", "Hoy estás cerca del objetivo..." o "Hoy superaste la ingesta objetivo; mañana vuelve a tu objetivo normal...".
+13. No uses lenguaje culpabilizante. Habla de consistencia semanal y sostenibilidad.
+14. Antes de responder, comprueba que headline y analysis respeten las definiciones de déficit, superávit e ingesta objetivo.
+15. Devuelve SOLO JSON válido, sin markdown.
 
 FORMATO JSON EXACTO
 {{
   "status": "bien|atencion|incompleto",
   "headline": "frase de máximo 12 palabras",
-  "analysis": "2 a 4 frases breves explicando cómo va el día",
+  "analysis": "2 a 4 frases breves explicando cómo va el día con terminología energética correcta",
   "action_message": "recomendación principal concreta y accionable",
   "next_meals": [
     {{"name":"...", "kcal":0, "protein_g":0, "reason":"..."}},
@@ -401,6 +434,85 @@ FORMATO JSON EXACTO
 }}
 """.strip()
 
+
+def _enforce_energy_terminology(result: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+    """Corrige de forma determinista conceptos energéticos aunque el modelo use mal los términos."""
+    out = dict(result or {})
+
+    consumed = float(context.get("consumed_kcal") or 0)
+    expenditure = float(context.get("expenditure_kcal") or 0)
+    calorie_target = float(context.get("calorie_target_kcal") or 0)
+    target_deficit = float(context.get("target_deficit_kcal") or 0)
+    protein = float(context.get("protein_g") or 0)
+    protein_target = float(context.get("protein_target_g") or 0)
+    status = str(context.get("meal_window_status") or "within")
+
+    energy_deficit = expenditure - consumed
+    intake_gap = calorie_target - consumed
+    deficit_vs_target = energy_deficit - target_deficit
+    protein_gap = max(0.0, protein_target - protein)
+
+    # Durante el día no imponemos un cierre definitivo.
+    if status in {"before", "within"}:
+        if energy_deficit >= 0:
+            headline = "Déficit acumulado hasta este momento"
+            analysis = (
+                f"Hasta ahora consumiste {consumed:.0f} kcal frente a un gasto estimado de {expenditure:.0f} kcal, "
+                f"por lo que el déficit acumulado es de aproximadamente {energy_deficit:.0f} kcal. "
+                "Este valor todavía puede cambiar con las siguientes comidas del día."
+            )
+        else:
+            headline = "Superávit acumulado hasta este momento"
+            analysis = (
+                f"Hasta ahora consumiste {consumed:.0f} kcal frente a un gasto estimado de {expenditure:.0f} kcal, "
+                f"por lo que existe un superávit acumulado aproximado de {abs(energy_deficit):.0f} kcal. "
+                "El balance todavía puede cambiar durante el resto del día."
+            )
+    else:
+        if energy_deficit >= 0:
+            if deficit_vs_target > 250:
+                headline = "Déficit calórico mayor al objetivo"
+            elif deficit_vs_target < -250:
+                headline = "Déficit calórico menor al objetivo"
+            else:
+                headline = "Déficit calórico cercano al objetivo"
+
+            if protein_gap > 10:
+                headline += " y proteína insuficiente"
+
+            analysis = (
+                f"Consumiste {consumed:.0f} kcal frente a un gasto estimado de {expenditure:.0f} kcal, "
+                f"lo que representa un déficit calórico aproximado de {energy_deficit:.0f} kcal. "
+                f"Tu déficit objetivo era cercano a {target_deficit:.0f} kcal"
+            )
+            if deficit_vs_target > 0:
+                analysis += f", por lo que el déficit fue aproximadamente {deficit_vs_target:.0f} kcal mayor de lo planificado."
+            elif deficit_vs_target < 0:
+                analysis += f", por lo que el déficit quedó aproximadamente {abs(deficit_vs_target):.0f} kcal por debajo de lo planificado."
+            else:
+                analysis += "."
+        else:
+            headline = "Superávit calórico estimado"
+            if protein_gap > 10:
+                headline += " y proteína insuficiente"
+            analysis = (
+                f"Consumiste {consumed:.0f} kcal frente a un gasto estimado de {expenditure:.0f} kcal, "
+                f"lo que representa un superávit energético aproximado de {abs(energy_deficit):.0f} kcal. "
+                "Mañana conviene volver al objetivo habitual sin compensaciones extremas."
+            )
+
+    if protein_target > 0 and protein_gap > 0:
+        analysis += f" La proteína registrada es {protein:.0f} g de una meta aproximada de {protein_target:.0f} g."
+
+    # La cifra de ingesta objetivo se expresa aparte para no confundirla con déficit/superávit.
+    if status == "after" and intake_gap > 100:
+        analysis += f" Para llegar a tu ingesta objetivo del día faltaron aproximadamente {intake_gap:.0f} kcal."
+    elif status == "after" and intake_gap < -100:
+        analysis += f" La ingesta superó tu objetivo del día en aproximadamente {abs(intake_gap):.0f} kcal."
+
+    out["headline"] = headline
+    out["analysis"] = analysis
+    return out
 
 def _normalize_guidance(data: dict[str, Any], provider: str) -> dict[str, Any]:
     status = str(data.get("status") or "bien").strip().lower()
@@ -519,13 +631,15 @@ def analyze_daily_balance(
 
     if str(gemini_api_key or "").strip():
         try:
-            return _try_gemini_guidance(prompt, gemini_api_key, gemini_model or DEFAULT_GEMINI_MODEL)
+            result = _try_gemini_guidance(prompt, gemini_api_key, gemini_model or DEFAULT_GEMINI_MODEL)
+            return _enforce_energy_terminology(result, context)
         except Exception as exc:
             errors.append(f"Gemini: {exc}")
 
     if str(openrouter_api_key or "").strip():
         try:
-            return _try_openrouter_guidance(prompt, openrouter_api_key, openrouter_model or DEFAULT_OPENROUTER_MODEL)
+            result = _try_openrouter_guidance(prompt, openrouter_api_key, openrouter_model or DEFAULT_OPENROUTER_MODEL)
+            return _enforce_energy_terminology(result, context)
         except Exception as exc:
             errors.append(f"OpenRouter: {exc}")
 

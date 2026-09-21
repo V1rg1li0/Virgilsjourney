@@ -1479,43 +1479,69 @@ def _daily_coach_context(logs, profile, current_weight, expenditure_kcal, activi
 def _render_ai_daily_coach(context, result=None):
     if not context:
         return
-    remaining = context["remaining_kcal"]
-    rem_label = f"{remaining:.0f} kcal" if remaining >= 0 else f"{abs(remaining):.0f} kcal sobre objetivo"
+
+    remaining = float(context.get("remaining_kcal") or 0)
+    status = context.get("meal_window_status", "within")
+    consumed = float(context.get("consumed_kcal") or 0)
+    expenditure = float(context.get("expenditure_kcal") or 0)
+    target_deficit = float(context.get("target_deficit_kcal") or 0)
+    energy_deficit = expenditure - consumed
+
+    # La tercera tarjeta cambia de significado según si el día sigue abierto o ya cerró.
+    if status == "after":
+        if remaining >= 0:
+            third_title = "Faltaron para objetivo"
+            third_value = f"{remaining:.0f} kcal"
+        else:
+            third_title = "Sobre ingesta objetivo"
+            third_value = f"{abs(remaining):.0f} kcal"
+    else:
+        third_title = "Disponible"
+        third_value = f"{remaining:.0f} kcal" if remaining >= 0 else f"{abs(remaining):.0f} kcal sobre objetivo"
+
     st.markdown("### Balance inteligente de hoy")
     c1, c2, c3 = st.columns(3)
-    c1.metric("Objetivo de hoy", f"{context['calorie_target_kcal']:.0f} kcal")
-    c2.metric("Consumido", f"{context['consumed_kcal']:.0f} kcal")
-    c3.metric("Disponible", rem_label)
-    _render_progress("Calorías", context["consumed_kcal"], context["calorie_target_kcal"], "kcal")
+    c1.metric("Objetivo de ingesta", f"{context['calorie_target_kcal']:.0f} kcal")
+    c2.metric("Consumido", f"{consumed:.0f} kcal")
+    c3.metric(third_title, third_value)
+
+    _render_progress("Calorías", consumed, context["calorie_target_kcal"], "kcal")
     _render_progress("Proteína", context["protein_g"], context["protein_target_g"], "g")
 
-    status = context.get("meal_window_status", "within")
     now_txt = context.get("current_local_time", "")
     start_txt = context.get("meal_window_start", "08:00")
     end_txt = context.get("meal_window_end", "21:00")
     fasting = bool(context.get("intermittent_fasting"))
-    apparent = float(context.get("apparent_deficit_so_far") or 0)
     fasting_txt = " con ayuno intermitente" if fasting else ""
 
     if status == "before":
         st.info(
             f"Son las {now_txt}. Tu rango habitual de comidas es {start_txt}–{end_txt}{fasting_txt}. "
-            f"El balance acumulado es {apparent:+.0f} kcal, pero aún no corresponde evaluarlo como déficit diario."
+            f"El déficit energético acumulado hasta ahora es de aproximadamente {max(0, energy_deficit):.0f} kcal, "
+            "pero aún no corresponde evaluarlo como déficit diario final."
         )
     elif status == "within":
+        if energy_deficit >= 0:
+            balance_txt = f"déficit energético acumulado de aproximadamente {energy_deficit:.0f} kcal"
+        else:
+            balance_txt = f"superávit energético acumulado de aproximadamente {abs(energy_deficit):.0f} kcal"
         st.info(
             f"Son las {now_txt} y aún estás dentro de tu rango de comidas {start_txt}–{end_txt}{fasting_txt}. "
-            f"Tu balance actual es {apparent:+.0f} kcal; la recomendación considera lo que todavía puedes comer hoy."
+            f"Tienes un {balance_txt}; todavía puede cambiar con las siguientes comidas del día."
         )
     else:
+        if energy_deficit >= 0:
+            close_txt = f"déficit calórico estimado de {energy_deficit:.0f} kcal"
+        else:
+            close_txt = f"superávit calórico estimado de {abs(energy_deficit):.0f} kcal"
         st.caption(
             f"Tu rango habitual de comidas {start_txt}–{end_txt}{fasting_txt} ya terminó. "
-            "Si registraste todo lo consumido, la IA tratará este valor como cierre aproximado del día."
+            f"Si registraste todo lo consumido, el cierre aproximado de hoy corresponde a un {close_txt}."
         )
 
     st.caption(
-        f"Déficit objetivo orientativo: ~{context['target_deficit_kcal']:.0f} kcal/día · "
-        "el objetivo es que sea sostenible, no maximizar el déficit."
+        f"Déficit objetivo orientativo: ~{target_deficit:.0f} kcal/día · "
+        "la meta es mantener un déficit sostenible, no maximizarlo."
     )
 
     if not result:
@@ -1569,7 +1595,6 @@ def _render_ai_daily_coach(context, result=None):
         st.info(result["activity_note"])
     if result.get("provider"):
         st.caption(f"Análisis generado por {result['provider']}. Las cifras son estimaciones orientativas.")
-
 
 def _meal_schedule_form(sb, uid, profile, key_prefix="meal_schedule", compact=False):
     schedule = _meal_window(profile)
