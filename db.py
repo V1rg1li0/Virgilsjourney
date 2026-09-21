@@ -7,15 +7,26 @@ def configured() -> bool:
     return bool(st.secrets.get("SUPABASE_URL", "") and st.secrets.get("SUPABASE_ANON_KEY", ""))
 
 
+def _clear_session_state():
+    for key in ["access_token", "refresh_token", "user_id", "email"]:
+        st.session_state.pop(key, None)
+
+
 def client() -> Client:
     sb = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_ANON_KEY"])
     access = st.session_state.get("access_token")
     refresh = st.session_state.get("refresh_token")
     if access and refresh:
         try:
-            sb.auth.set_session(access, refresh)
+            res = sb.auth.set_session(access, refresh)
+            if getattr(res, "session", None):
+                st.session_state.access_token = res.session.access_token
+                st.session_state.refresh_token = res.session.refresh_token
+                if getattr(res, "user", None):
+                    st.session_state.user_id = res.user.id
+                    st.session_state.email = res.user.email
         except Exception:
-            pass
+            _clear_session_state()
     return sb
 
 
@@ -40,5 +51,4 @@ def sign_out():
         client().auth.sign_out()
     except Exception:
         pass
-    for k in ["access_token", "refresh_token", "user_id", "email"]:
-        st.session_state.pop(k, None)
+    _clear_session_state()

@@ -1,11 +1,24 @@
 
 from __future__ import annotations
 
+import sys
+
+# En equipos Windows corporativos puede ser necesario usar el almacén de certificados del sistema.
+# En Streamlit Cloud/Linux este bloque no hace nada.
+if sys.platform == "win32":
+    try:
+        import truststore
+        truststore.inject_into_ssl()
+    except Exception:
+        pass
 
 from datetime import date, datetime, timedelta
+from io import BytesIO
+from uuid import uuid4
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
+from PIL import Image, ImageOps
 
 from analytics import build_projection, bmi, tdee_estimate
 from db import configured, client, sign_in, sign_up, sign_out
@@ -35,6 +48,11 @@ div[data-testid="stTabs"]{margin-top:.35rem;margin-bottom:.6rem;}
 """, unsafe_allow_html=True)
 
 WEEKDAYS = ["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"]
+
+PHOTO_BUCKET = "progress-photos"
+MAX_PHOTO_BYTES = 6 * 1024 * 1024
+PHOTO_MAX_SIDE = 1600
+DONATION_WHATSAPP = "56985827304"
 
 
 def hero(sub="Control semanal de progreso, hábitos y nutrición"):
@@ -101,6 +119,102 @@ def load_nutrition(sb, uid, day=None):
     return pd.DataFrame(r.data or [])
 
 
+def _prepare_progress_photo(uploaded_file) -> bytes:
+    """Valida y re-codifica la foto para reducir tamaño y eliminar EXIF/metadatos."""
+    raw = uploaded_file.getvalue()
+    if not raw:
+        raise ValueError("La foto está vacía.")
+    if len(raw) > MAX_PHOTO_BYTES:
+        raise ValueError("La foto supera el máximo de 6 MB.")
+    try:
+        image = Image.open(BytesIO(raw))
+        image.load()
+    except Exception as exc:
+        raise ValueError("El archivo seleccionado no es una imagen válida.") from exc
+
+    image = ImageOps.exif_transpose(image)
+    if image.mode in ("RGBA", "LA"):
+        background = Image.new("RGB", image.size, "white")
+        alpha = image.getchannel("A") if "A" in image.getbands() else None
+        background.paste(image.convert("RGB"), mask=alpha)
+        image = background
+    elif image.mode != "RGB":
+        image = image.convert("RGB")
+
+    image.thumbnail((PHOTO_MAX_SIDE, PHOTO_MAX_SIDE))
+    out = BytesIO()
+    # Re-guardar sin EXIF elimina ubicación GPS y otros metadatos del archivo original.
+    image.save(out, format="JPEG", quality=88, optimize=True)
+    return out.getvalue()
+
+
+def upload_progress_photo(sb, uid: str, measured_on: date, uploaded_file) -> str:
+    photo_bytes = _prepare_progress_photo(uploaded_file)
+    path = f"{uid}/{measured_on.isoformat()}/{uuid4().hex}.jpg"
+    sb.storage.from_(PHOTO_BUCKET).upload(
+        path=path,
+        file=photo_bytes,
+        file_options={
+            "content-type": "image/jpeg",
+            "cache-control": "3600",
+            "upsert": "false",
+        },
+    )
+    return path
+
+
+def delete_progress_photo(sb, path: str | None):
+    if not path:
+        return
+    try:
+        sb.storage.from_(PHOTO_BUCKET).remove([path])
+    except Exception:
+        # No bloqueamos una medición por un fallo de limpieza de una foto anterior.
+        pass
+
+
+def signed_photo_url(sb, path: str | None, expires_in: int = 300) -> str | None:
+    if not path:
+        return None
+    try:
+        data = sb.storage.from_(PHOTO_BUCKET).create_signed_url(path, expires_in)
+        if isinstance(data, dict):
+            return data.get("signedURL") or data.get("signedUrl") or data.get("signed_url")
+        return getattr(data, "signed_url", None) or getattr(data, "signedURL", None)
+    except Exception:
+        return None
+
+
+def progress_photo_gallery(sb, measurements: pd.DataFrame):
+    if measurements.empty or "photo_path" not in measurements.columns:
+        return
+    photos = measurements[measurements["photo_path"].notna()].copy()
+    if photos.empty:
+        return
+    photos = photos.sort_values("measured_on", ascending=False).head(6)
+    st.markdown("### Fotos de progreso")
+    st.caption("Privadas: se muestran mediante enlaces temporales y se eliminan metadatos EXIF/GPS antes de subirlas.")
+    cols = st.columns(2)
+    for i, (_, row) in enumerate(photos.iterrows()):
+        url = signed_photo_url(sb, row.get("photo_path"))
+        if url:
+            day_txt = pd.to_datetime(row["measured_on"]).strftime("%d-%m-%Y")
+            with cols[i % 2]:
+                st.image(url, caption=day_txt, use_container_width=True)
+
+
+def support_card():
+    st.markdown("### Apoya Virgils Journey")
+    st.info(
+        "Virgils Journey es una aplicación de uso gratuito. "
+        "Si deseas realizar un aporte voluntario, puedes solicitar los datos de Cuenta RUT por WhatsApp."
+    )
+    st.markdown(
+        f"[💬 Solicitar datos para aporte voluntario por WhatsApp](https://wa.me/{DONATION_WHATSAPP}?text=Hola%2C%20quisiera%20solicitar%20los%20datos%20para%20realizar%20un%20aporte%20voluntario%20a%20Virgils%20Journey.)"
+    )
+    st.caption("WhatsApp: +56 9 8582 7304 · Los aportes son completamente voluntarios y no habilitan funciones adicionales.")
+
+
 def onboarding(sb, uid, email):
     hero("Configura tu punto de partida")
     st.info("Tu primera medición define el día habitual del recordatorio semanal. Puedes cambiarlo después.")
@@ -119,6 +233,7 @@ def onboarding(sb, uid, email):
         sex = st.selectbox("Sexo para estimación metabólica (opcional)", ["No indicar", "Hombre", "Mujer"])
         activity = st.selectbox("Actividad habitual (opcional)", ["Sedentario","Ligero","Moderado","Alto","Muy alto"])
         reminder = st.selectbox("Día de recordatorio semanal", WEEKDAYS, index=date.today().weekday())
+        photo = st.file_uploader("Foto de progreso inicial (opcional)", type=["jpg", "jpeg", "png", "webp"], key="onboarding_photo", help="Máximo 6 MB. La app elimina metadatos EXIF/GPS antes de guardarla.")
         consent = st.checkbox("Entiendo que las proyecciones son estimaciones orientativas y no reemplazan atención médica.")
         submit = st.form_submit_button("Comenzar mi Journey", use_container_width=True)
     if submit:
@@ -136,6 +251,12 @@ def onboarding(sb, uid, email):
             "chest_cm": float(chest), "waist_cm": float(waist), "neck_cm": float(neck), "hip_cm": float(hip),
             "notes": "Medición inicial"
         }).execute()
+        if photo is not None:
+            try:
+                photo_path = upload_progress_photo(sb, uid, date.today(), photo)
+                sb.table("measurements").update({"photo_path": photo_path}).eq("user_id", uid).eq("measured_on", str(date.today())).execute()
+            except Exception as exc:
+                st.warning(f"La medición se guardó, pero la foto no pudo subirse: {exc}")
         st.success("Journey iniciado.")
         st.rerun()
 
@@ -197,6 +318,7 @@ def dashboard(sb, uid, profile, measurements):
     c3.metric("Cuello", f"{float(last['neck_cm']):.1f} cm")
     c4.metric("Cadera", f"{float(last['hip_cm']):.1f} cm")
     st.caption(f"IMC actual: {projection.bmi_current:.1f} · IMC en meta: {projection.bmi_goal:.1f}" if projection.bmi_current else "")
+    progress_photo_gallery(sb, measurements)
 
 
 def measurement_form(sb, uid, measurements):
@@ -217,12 +339,26 @@ def measurement_form(sb, uid, measurements):
             neck = st.number_input("Cuello (cm)", 20.0, 80.0, defaults["neck_cm"], 0.5)
             hip = st.number_input("Cadera (cm)", 40.0, 220.0, defaults["hip_cm"], 0.5)
         notes = st.text_area("Notas (opcional)", placeholder="Sueño, entrenamiento, viaje, retención de líquidos, etc.")
+        photo = st.file_uploader("Foto de progreso (opcional)", type=["jpg", "jpeg", "png", "webp"], key="measurement_photo", help="Máximo 6 MB. Se guarda de forma privada y sin EXIF/GPS.")
         ok = st.form_submit_button("Guardar medición", use_container_width=True)
     if ok:
+        previous = sb.table("measurements").select("photo_path").eq("user_id", uid).eq("measured_on", str(day)).limit(1).execute()
+        old_photo_path = previous.data[0].get("photo_path") if previous.data else None
+
         sb.table("measurements").upsert({
             "user_id":uid,"measured_on":str(day),"weight_kg":float(weight),"chest_cm":float(chest),
             "waist_cm":float(waist),"neck_cm":float(neck),"hip_cm":float(hip),"notes":notes
         }, on_conflict="user_id,measured_on").execute()
+
+        if photo is not None:
+            try:
+                new_photo_path = upload_progress_photo(sb, uid, day, photo)
+                sb.table("measurements").update({"photo_path": new_photo_path}).eq("user_id", uid).eq("measured_on", str(day)).execute()
+                if old_photo_path and old_photo_path != new_photo_path:
+                    delete_progress_photo(sb, old_photo_path)
+            except Exception as exc:
+                st.warning(f"La medición se guardó, pero la foto no pudo subirse: {exc}")
+
         st.success("Medición guardada.")
         st.rerun()
 
@@ -290,6 +426,12 @@ def settings_page(sb, uid, profile):
     st.markdown("### Metodología")
     st.write("La proyección se activa con al menos 4 mediciones distribuidas en ~4 semanas. Usa una tendencia robusta de peso (mediana de pendientes entre pares de puntos), y se actualiza con hasta las últimas 8 mediciones.")
     st.write("El rango de 1–2 lb/semana se muestra solo como referencia de pérdida gradual citada por CDC. La fecha objetivo es una estimación y puede cambiar por líquidos, adherencia, enfermedad, medicamentos, sueño y otros factores.")
+
+    st.markdown("### Privacidad")
+    st.caption("Las mediciones y fotos se asocian a tu usuario. Las fotos se guardan en un bucket privado de Supabase y se muestran con enlaces temporales. Evita subir imágenes que no quieras conservar en el servicio.")
+
+    support_card()
+
     if st.button("Cerrar sesión", use_container_width=True):
         sign_out(); st.rerun()
 

@@ -5,4 +5,5 @@ numpy>=2.0
 plotly>=5.24
 google-genai>=1.0
 requests>=2.32
-
+Pillow>=11.0
+truststore>=0.10; sys_platform == "win32"
