@@ -1,8 +1,6 @@
 
 from __future__ import annotations
 
-import truststore
-truststore.inject_into_ssl()
 
 from datetime import date, datetime, timedelta
 import pandas as pd
