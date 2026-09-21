@@ -216,6 +216,102 @@ a{
     color:#222222;
 }
 
+/* Guía rápida / onboarding */
+.vj-guide-shell{
+    background:#FFFFFF;
+    border:1px solid #D8D8D8;
+    border-radius:22px;
+    padding:24px 22px;
+    box-shadow:0 10px 28px rgba(0,0,0,.08);
+    margin:10px 0 14px;
+}
+.vj-guide-kicker{
+    color:#777777;
+    font-size:12px;
+    font-weight:900;
+    text-transform:uppercase;
+    letter-spacing:.10em;
+}
+.vj-guide-title{
+    color:#111111;
+    font-size:27px;
+    font-weight:900;
+    line-height:1.12;
+    margin-top:8px;
+    letter-spacing:-.02em;
+}
+.vj-guide-copy{
+    color:#4F4F4F;
+    font-size:15px;
+    line-height:1.6;
+    margin-top:12px;
+}
+.vj-quote{
+    color:#111111;
+    font-size:21px;
+    font-weight:800;
+    line-height:1.55;
+    text-align:center;
+    padding:14px 4px 6px;
+}
+.vj-quote-author{
+    color:#666666;
+    font-size:14px;
+    font-weight:800;
+    text-align:center;
+    margin-top:10px;
+}
+.vj-guide-pills{
+    display:grid;
+    grid-template-columns:repeat(4,1fr);
+    gap:7px;
+    margin-top:16px;
+}
+.vj-guide-pill{
+    background:#F3F3F3;
+    border:1px solid #E0E0E0;
+    border-radius:12px;
+    padding:9px 7px;
+    text-align:center;
+    color:#555555;
+    font-size:11px;
+    font-weight:800;
+}
+.vj-guide-step{
+    display:flex;
+    align-items:flex-start;
+    gap:12px;
+    margin-top:14px;
+    padding:13px;
+    border-radius:14px;
+    background:#F6F6F6;
+    border:1px solid #E2E2E2;
+}
+.vj-guide-icon{
+    width:36px;
+    height:36px;
+    min-width:36px;
+    border-radius:50%;
+    background:#111111;
+    color:#FFFFFF;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    font-size:17px;
+    font-weight:900;
+}
+.vj-guide-step-title{
+    color:#111111;
+    font-size:14px;
+    font-weight:900;
+}
+.vj-guide-step-copy{
+    color:#606060;
+    font-size:13px;
+    line-height:1.45;
+    margin-top:3px;
+}
+
 /* Mobile */
 @media (max-width:640px){
     .block-container{
@@ -694,8 +790,166 @@ def support_card():
     st.caption("WhatsApp: +56 9 8582 7304 · Los aportes son completamente voluntarios y no habilitan funciones adicionales.")
 
 
+def quick_guide(new_user: bool = False, key_prefix: str = "guide") -> bool:
+    """
+    Guía rápida de Virgils Journey.
+
+    Retorna True cuando el usuario termina (o decide saltar) la guía.
+    Para usuarios nuevos se muestra antes de crear su perfil; para usuarios
+    existentes puede abrirse nuevamente desde Ajustes.
+    """
+    state_key = f"{key_prefix}_step"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = 0
+
+    step = int(st.session_state.get(state_key, 0))
+    max_step = 4
+
+    # Progreso visual. La primera pantalla también cuenta como parte de la guía.
+    st.progress(min((step + 1) / (max_step + 1), 1.0))
+    st.caption(f"Guía rápida · {step + 1} de {max_step + 1}")
+
+    if step == 0:
+        st.markdown(
+            """
+            <div class='vj-guide-shell'>
+                <div class='vj-guide-kicker'>Antes de comenzar</div>
+                <div class='vj-quote'>
+                    La obsesión siempre vence al talento.<br><br>
+                    Obsesiónate con ser tu mejor versión. No busques aprobación externa,
+                    hazlo en secreto, y cuando logres tus metas publícalas; no para
+                    jactarte, sino para ser la luz que guíe a otros que están en las sombras.
+                </div>
+                <div class='vj-quote-author'>— Virgilio</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    elif step == 1:
+        st.markdown(
+            """
+            <div class='vj-guide-shell'>
+                <div class='vj-guide-kicker'>1 · Tu punto de partida</div>
+                <div class='vj-guide-title'>Mide dónde estás para saber cuánto avanzas.</div>
+                <div class='vj-guide-copy'>
+                    Comienza registrando peso, medidas corporales, meta y, si quieres,
+                    una foto de progreso. Esta primera medición será la referencia de tu Journey.
+                </div>
+                <div class='vj-guide-step'>
+                    <div class='vj-guide-icon'>1</div>
+                    <div><div class='vj-guide-step-title'>Haz una medición realista</div>
+                    <div class='vj-guide-step-copy'>No necesitas un punto de partida perfecto; necesitas uno verdadero.</div></div>
+                </div>
+                <div class='vj-guide-step'>
+                    <div class='vj-guide-icon'>2</div>
+                    <div><div class='vj-guide-step-title'>Define una meta</div>
+                    <div class='vj-guide-step-copy'>La app comparará tu tendencia real con el objetivo que definas.</div></div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    elif step == 2:
+        st.markdown(
+            """
+            <div class='vj-guide-shell'>
+                <div class='vj-guide-kicker'>2 · Tu día a día</div>
+                <div class='vj-guide-title'>Registra lo que realmente haces.</div>
+                <div class='vj-guide-copy'>
+                    En <b>Nutrición</b> puedes registrar alimentos, calorías y macronutrientes.
+                    También puedes guardar pasos y entrenamiento de fuerza para entender mejor
+                    cómo tus hábitos se relacionan con el progreso.
+                </div>
+                <div class='vj-guide-pills'>
+                    <div class='vj-guide-pill'>🥗 Nutrición</div>
+                    <div class='vj-guide-pill'>👟 Pasos</div>
+                    <div class='vj-guide-pill'>🏋️ Fuerza</div>
+                    <div class='vj-guide-pill'>🔥 Balance</div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    elif step == 3:
+        st.markdown(
+            """
+            <div class='vj-guide-shell'>
+                <div class='vj-guide-kicker'>3 · Tu progreso</div>
+                <div class='vj-guide-title'>Busca tendencias, no días perfectos.</div>
+                <div class='vj-guide-copy'>
+                    En <b>Inicio</b> verás la evolución de tu peso, medidas y proyecciones.
+                    Virgils Journey prioriza la tendencia observada: una semana aislada no define
+                    el resultado. Lo importante es acumular consistencia.
+                </div>
+                <div class='vj-guide-step'>
+                    <div class='vj-guide-icon'>↗</div>
+                    <div><div class='vj-guide-step-title'>Actualiza tu medición semanal</div>
+                    <div class='vj-guide-step-copy'>Con varias mediciones la app puede construir una tendencia más útil.</div></div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    else:
+        st.markdown(
+            """
+            <div class='vj-guide-shell'>
+                <div class='vj-guide-kicker'>4 · Empieza</div>
+                <div class='vj-guide-title'>No necesitas sentirte preparado. Necesitas comenzar.</div>
+                <div class='vj-guide-copy'>
+                    Registra, cumple, revisa y repite. Tu Journey no se construye con un gran día,
+                    sino con muchos días suficientemente buenos.
+                </div>
+                <div class='vj-quote' style='font-size:24px;padding-top:20px;'>Día 1 empieza ahora.</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    left, center, right = st.columns([1, 1.35, 1])
+
+    with left:
+        if step > 0 and st.button("← Atrás", key=f"{key_prefix}_back", use_container_width=True):
+            st.session_state[state_key] = step - 1
+            st.rerun()
+
+    with center:
+        # En usuarios nuevos permitimos saltar, pero la guía siempre aparece primero.
+        if new_user and step < max_step:
+            if st.button("Saltar guía", key=f"{key_prefix}_skip", use_container_width=True):
+                st.session_state[state_key] = max_step + 1
+                st.rerun()
+
+    with right:
+        if step < max_step:
+            if st.button("Siguiente →", key=f"{key_prefix}_next", use_container_width=True):
+                st.session_state[state_key] = step + 1
+                st.rerun()
+        else:
+            label = "Configurar mi punto de partida" if new_user else "Cerrar guía"
+            if st.button(label, key=f"{key_prefix}_finish", use_container_width=True):
+                st.session_state[state_key] = max_step + 1
+                if not new_user:
+                    st.session_state["vj_show_quick_guide"] = False
+                st.rerun()
+
+    return int(st.session_state.get(state_key, 0)) > max_step
+
+
 def onboarding(sb, uid, email):
-    hero("Configura tu punto de partida")
+    hero("Tu Journey comienza aquí")
+
+    # Un usuario sin perfil es un usuario nuevo. La guía se muestra antes de
+    # crear su perfil y, una vez completada, pasa a la configuración inicial.
+    guide_done = quick_guide(new_user=True, key_prefix="vj_new_user_guide")
+    if not guide_done:
+        return
+
+    st.markdown("## Configura tu punto de partida")
     st.info("Tu primera medición define el día habitual del recordatorio semanal. Puedes cambiarlo después.")
     with st.form("onboarding"):
         c1, c2 = st.columns(2)
@@ -1083,6 +1337,18 @@ def nutrition_page(sb, uid, profile, measurements):
 
 def settings_page(sb, uid, profile):
     st.markdown("## Ajustes")
+
+    st.markdown("### Guía rápida")
+    st.caption("Puedes volver a ver el recorrido inicial cuando quieras.")
+    if st.button("Ver guía rápida", key="open_quick_guide", use_container_width=True):
+        st.session_state["vj_show_quick_guide"] = True
+        st.session_state["vj_replay_guide_step"] = 0
+        st.rerun()
+
+    if st.session_state.get("vj_show_quick_guide", False):
+        quick_guide(new_user=False, key_prefix="vj_replay_guide")
+        st.divider()
+
     with st.form("settings"):
         goal = st.number_input("Meta de peso (kg)", 35.0, 300.0, float(profile["goal_weight_kg"]), 0.1)
         reminder = st.selectbox("Día de recordatorio", WEEKDAYS, index=int(profile.get("reminder_weekday") or 0))
@@ -1116,6 +1382,9 @@ def settings_page(sb, uid, profile):
 for key in ["access_token", "refresh_token", "user_id", "email", "auth_provider"]:
     if key not in st.session_state:
         st.session_state[key] = None
+
+if "vj_show_quick_guide" not in st.session_state:
+    st.session_state["vj_show_quick_guide"] = False
 
 if not st.session_state.get("access_token") or not st.session_state.get("user_id"):
     if sync_google_session_to_supabase():
