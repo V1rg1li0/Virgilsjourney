@@ -29,7 +29,7 @@ from analytics import (
     daily_expenditure_with_activity,
     behavior_projection_from_energy_balance,
 )
-from db import configured, client, sign_in, sign_up, sign_out
+from db import configured, client, sign_in, sign_up, sign_out, sign_in_with_google_tokens
 from ai_nutrition import estimate_nutrition
 
 st.set_page_config(page_title="Virgils Journey", page_icon="⚫", layout="centered")
@@ -281,29 +281,93 @@ def hero(sub="Control semanal de progreso, hábitos y nutrición"):
     )
 
 
+
+def sync_google_session_to_supabase():
+    """
+    Si Streamlit ya autenticó al usuario con Google, intercambia el ID token
+    por una sesión Supabase para conservar las políticas RLS existentes.
+    """
+    try:
+        is_google_logged = bool(getattr(st.user, "is_logged_in", False))
+    except Exception:
+        is_google_logged = False
+
+    if not is_google_logged:
+        return False
+
+    if st.session_state.get("access_token") and st.session_state.get("user_id"):
+        return True
+
+    try:
+        id_token = st.user.tokens.get("id")
+        access_token = st.user.tokens.get("access")
+
+        sign_in_with_google_tokens(
+            id_token=id_token,
+            access_token=access_token,
+        )
+        return True
+    except Exception as e:
+        st.error(
+            "Google autenticó la cuenta, pero no fue posible crear la sesión "
+            f"en Supabase: {e}"
+        )
+        return False
+
+
 def auth_screen():
     hero("Tu viaje, medido con datos y proyecciones prudentes")
+
     if not configured():
-        st.error("Falta configurar Supabase. Revisa README.md y .streamlit/secrets.example.toml.")
+        st.error("Falta configurar Supabase. Revisa los Secrets de la aplicación.")
         st.stop()
+
+    # Si el navegador acaba de volver del login de Google, sincronizamos
+    # automáticamente esa identidad con Supabase.
+    if sync_google_session_to_supabase():
+        st.rerun()
+
+    st.markdown("### Accede a tu Journey")
+
+    if st.button(
+        "G  Continuar con Google",
+        use_container_width=True,
+        type="primary",
+        key="google_login",
+    ):
+        st.login("google")
+
+    st.caption("O continúa con correo y contraseña")
     tab1, tab2 = st.tabs(["Ingresar", "Crear cuenta"])
+
     with tab1:
         with st.form("login"):
             email = st.text_input("Correo")
             password = st.text_input("Contraseña", type="password")
             ok = st.form_submit_button("Entrar", use_container_width=True)
+
         if ok:
             try:
                 sign_in(email.strip(), password)
                 st.rerun()
             except Exception as e:
                 st.error(f"No fue posible iniciar sesión: {e}")
+
     with tab2:
         with st.form("signup"):
             email = st.text_input("Correo", key="su_email")
-            p1 = st.text_input("Contraseña (mín. 8 caracteres)", type="password", key="su_p1")
-            p2 = st.text_input("Repite contraseña", type="password", key="su_p2")
+            p1 = st.text_input(
+                "Contraseña (mín. 8 caracteres)",
+                type="password",
+                key="su_p1",
+            )
+            p2 = st.text_input(
+                "Repite contraseña",
+                type="password",
+                key="su_p2",
+            )
             ok = st.form_submit_button("Crear cuenta", use_container_width=True)
+
         if ok:
             if p1 != p2 or len(p1) < 8:
                 st.warning("Revisa la contraseña.")
@@ -315,13 +379,17 @@ def auth_screen():
                         st.session_state.refresh_token = res.session.refresh_token
                         st.session_state.user_id = res.user.id
                         st.session_state.email = res.user.email
+                        st.session_state.auth_provider = "password"
                         st.rerun()
                     else:
-                        st.success("Cuenta creada. Revisa tu correo para confirmar y luego inicia sesión.")
+                        st.success(
+                            "Cuenta creada. Revisa tu correo para confirmar "
+                            "y luego inicia sesión."
+                        )
                 except Exception as e:
                     st.error(f"No fue posible crear la cuenta: {e}")
-    st.stop()
 
+    st.stop()
 
 def get_profile(sb, uid):
     r = sb.table("profiles").select("*").eq("user_id", uid).limit(1).execute()
@@ -1035,16 +1103,23 @@ def settings_page(sb, uid, profile):
     support_card()
 
     if st.button("Cerrar sesión", use_container_width=True):
-        sign_out(); st.rerun()
+        was_google = st.session_state.get("auth_provider") == "google"
+        sign_out()
+        if was_google:
+            st.logout()
+        else:
+            st.rerun()
 
 
 # --- app ---
 # Inicializar estado de sesión para evitar KeyError en reruns parciales
-for key in ["access_token", "refresh_token", "user_id", "email"]:
+for key in ["access_token", "refresh_token", "user_id", "email", "auth_provider"]:
     if key not in st.session_state:
         st.session_state[key] = None
 
 if not st.session_state.get("access_token") or not st.session_state.get("user_id"):
+    if sync_google_session_to_supabase():
+        st.rerun()
     auth_screen()
 
 sb = client()
