@@ -271,6 +271,7 @@ def weekly_due(df: pd.DataFrame) -> bool:
 def dashboard(sb, uid, profile, measurements):
     if measurements.empty:
         st.warning("No hay mediciones. Registra una para comenzar.")
+        support_card()
         return
     measurements = measurements.copy()
     measurements["measured_on"] = pd.to_datetime(measurements["measured_on"])
@@ -318,6 +319,7 @@ def dashboard(sb, uid, profile, measurements):
     c3.metric("Cuello", f"{float(last['neck_cm']):.1f} cm")
     c4.metric("Cadera", f"{float(last['hip_cm']):.1f} cm")
     st.caption(f"IMC actual: {projection.bmi_current:.1f} · IMC en meta: {projection.bmi_goal:.1f}" if projection.bmi_current else "")
+    support_card()
     progress_photo_gallery(sb, measurements)
 
 
@@ -361,6 +363,8 @@ def measurement_form(sb, uid, measurements):
 
         st.success("Medición guardada.")
         st.rerun()
+
+    support_card()
 
 
 def nutrition_page(sb, uid, profile, measurements):
@@ -435,6 +439,8 @@ def nutrition_page(sb, uid, profile, measurements):
         c1.metric("Calorías", f"{logs['calories_kcal'].fillna(0).sum():.0f} kcal")
         c2.metric("Proteína", f"{logs['protein_g'].fillna(0).sum():.0f} g")
         st.dataframe(logs[["description","calories_kcal","protein_g","carbs_g","fat_g"]], use_container_width=True, hide_index=True)
+
+    support_card()
 
 
 def settings_page(sb, uid, profile):
