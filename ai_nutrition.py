@@ -339,11 +339,17 @@ No diagnostiques ni sustituyas consejo médico. No propongas ayunos extremos,
 castigos con ejercicio ni déficits mayores al objetivo entregado por la app.
 
 DATOS DEL DÍA
+- Hora local actual: {context.get('current_local_time','')}
+- ¿Ayuno intermitente?: {'Sí' if context.get('intermittent_fasting') else 'No'}
+- Rango habitual de comidas: {context.get('meal_window_start','08:00')}–{context.get('meal_window_end','21:00')}
+- Estado respecto al rango: {context.get('meal_window_status','within')}
+- Porcentaje aproximado transcurrido de la ventana: {context.get('meal_window_elapsed_pct',0):.0f}%
 - Calorías consumidas: {context.get('consumed_kcal',0):.0f} kcal
 - Proteína consumida: {context.get('protein_g',0):.0f} g
 - Carbohidratos consumidos: {context.get('carbs_g',0):.0f} g
 - Grasas consumidas: {context.get('fat_g',0):.0f} g
 - Gasto estimado: {context.get('expenditure_kcal',0):.0f} kcal
+- Balance aparente hasta este momento: {context.get('apparent_deficit_so_far',0):+.0f} kcal
 - Déficit objetivo: {context.get('target_deficit_kcal',0):.0f} kcal
 - Presupuesto calórico del día: {context.get('calorie_target_kcal',0):.0f} kcal
 - Calorías aproximadas disponibles: {context.get('remaining_kcal',0):.0f} kcal
@@ -357,14 +363,18 @@ COMIDAS REGISTRADAS
 {meals_text}
 
 REGLAS
-1. Evalúa si el registro parece incompleto antes de concluir que existe un déficit muy alto.
-2. Prioriza completar proteína, fibra, verduras/frutas y saciedad sin superar innecesariamente el presupuesto.
-3. Sugiere 2 o 3 opciones de próxima comida fáciles de conseguir/preparar en Chile/Latinoamérica.
-4. Cada opción debe incluir kcal aproximadas y proteína aproximada.
-5. Si quedan pocas calorías, no recomiendes saltarse comidas; propone una opción pequeña y nutritiva.
-6. Si ya se superó el presupuesto, propone una siguiente comida moderada y equilibrada, sin compensaciones extremas.
-7. Sé breve, concreto y accionable.
-8. Devuelve SOLO JSON válido, sin markdown.
+1. La hora y el rango habitual de comidas son obligatorios para interpretar el día.
+2. Si el estado es "before", NO marques el registro como incompleto ni emitas warning por pocas calorías: la ventana de alimentación aún no comienza.
+3. Si el estado es "within", interpreta el balance como "hasta este momento". NO lo llames déficit final ni emitas warning solo porque el consumo aún es bajo. Recomienda cómo distribuir lo que queda dentro de las horas restantes.
+4. Si el estado es "after", recién entonces puedes evaluar si el consumo total parece demasiado bajo o si faltan comidas por registrar.
+5. Si hay ayuno intermitente, respeta el rango indicado y no sugieras comer fuera de él salvo que el usuario ya lo haya superado o exista una razón de seguridad clara. No promuevas ayunos más largos.
+6. Prioriza completar proteína, fibra, verduras/frutas y saciedad sin superar innecesariamente el presupuesto.
+7. Sugiere 2 o 3 opciones de próxima comida fáciles de conseguir/preparar en Chile/Latinoamérica, coherentes con la hora actual y el tiempo restante de la ventana.
+8. Cada opción debe incluir kcal aproximadas y proteína aproximada.
+9. Si quedan pocas calorías, no recomiendes saltarse comidas; propone una opción pequeña y nutritiva.
+10. Si ya se superó el presupuesto, propone una siguiente comida moderada y equilibrada, sin compensaciones extremas.
+11. Sé breve, concreto y accionable.
+12. Devuelve SOLO JSON válido, sin markdown.
 
 FORMATO JSON EXACTO
 {{

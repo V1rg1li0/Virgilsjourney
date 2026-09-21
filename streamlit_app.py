@@ -15,7 +15,8 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, time as dt_time
+from zoneinfo import ZoneInfo
 from io import BytesIO
 from uuid import uuid4
 import pandas as pd
@@ -537,6 +538,96 @@ def preferred_name(profile: dict | None, fallback: str = "") -> str:
     return display_name or full_name or fallback or "viajero"
 
 
+def _parse_profile_time(value, default: dt_time) -> dt_time:
+    if isinstance(value, dt_time):
+        return value.replace(second=0, microsecond=0)
+    text = str(value or "").strip()
+    if not text:
+        return default
+    for fmt in ("%H:%M:%S", "%H:%M"):
+        try:
+            return datetime.strptime(text, fmt).time().replace(second=0, microsecond=0)
+        except ValueError:
+            pass
+    return default
+
+
+def _format_hhmm(value) -> str:
+    if isinstance(value, dt_time):
+        return value.strftime("%H:%M")
+    return _parse_profile_time(value, dt_time(8, 0)).strftime("%H:%M")
+
+
+def _local_now(profile: dict | None) -> datetime:
+    profile = profile or {}
+    tz_name = str(profile.get("timezone") or "America/Santiago").strip() or "America/Santiago"
+    try:
+        return datetime.now(ZoneInfo(tz_name))
+    except Exception:
+        return datetime.now()
+
+
+def _meal_window(profile: dict | None) -> dict:
+    profile = profile or {}
+    configured = (
+        profile.get("eating_window_start") is not None
+        and profile.get("eating_window_end") is not None
+        and profile.get("intermittent_fasting") is not None
+    )
+    fasting = bool(profile.get("intermittent_fasting")) if profile.get("intermittent_fasting") is not None else False
+    start = _parse_profile_time(profile.get("eating_window_start"), dt_time(8, 0))
+    end = _parse_profile_time(profile.get("eating_window_end"), dt_time(21, 0))
+    return {"configured": configured, "fasting": fasting, "start": start, "end": end}
+
+
+def _minutes_since_midnight(t: dt_time) -> int:
+    return t.hour * 60 + t.minute
+
+
+def _meal_window_status(profile: dict | None, now: datetime | None = None) -> dict:
+    window = _meal_window(profile)
+    now = now or _local_now(profile)
+    current = now.timetz().replace(tzinfo=None, second=0, microsecond=0)
+    cur_m = _minutes_since_midnight(current)
+    start_m = _minutes_since_midnight(window["start"])
+    end_m = _minutes_since_midnight(window["end"])
+
+    # Ventana normal (ej. 08:00-21:00) o nocturna que cruza medianoche.
+    if start_m == end_m:
+        status = "within"
+        elapsed = 1.0
+    elif start_m < end_m:
+        if cur_m < start_m:
+            status = "before"
+            elapsed = 0.0
+        elif cur_m <= end_m:
+            status = "within"
+            elapsed = (cur_m - start_m) / max(1, end_m - start_m)
+        else:
+            status = "after"
+            elapsed = 1.0
+    else:
+        # Ej. 18:00-02:00
+        in_window = cur_m >= start_m or cur_m <= end_m
+        if in_window:
+            status = "within"
+            total = (24 * 60 - start_m) + end_m
+            passed = (cur_m - start_m) if cur_m >= start_m else (24 * 60 - start_m) + cur_m
+            elapsed = passed / max(1, total)
+        else:
+            status = "before"
+            elapsed = 0.0
+
+    return {
+        **window,
+        "now": now,
+        "current_time": current,
+        "status": status,
+        "elapsed_fraction": min(1.0, max(0.0, float(elapsed))),
+        "window_label": f"{window['start'].strftime('%H:%M')}–{window['end'].strftime('%H:%M')}",
+    }
+
+
 def load_measurements(sb, uid):
     r = sb.table("measurements").select("*").eq("user_id", uid).order("measured_on").execute()
     return pd.DataFrame(r.data or [])
@@ -574,7 +665,7 @@ def _weekly_behavior_summary(sb, uid, profile, measurements, days=7):
     all_nutrition = load_nutrition(sb, uid)
     all_activity = load_activity(sb, uid)
 
-    end_day = date.today()
+    end_day = _local_now(profile).date()
     start_day = end_day - timedelta(days=days - 1)
     current_weight = _latest_weight(measurements)
 
@@ -665,11 +756,25 @@ def _weekly_behavior_summary(sb, uid, profile, measurements, days=7):
             "projection": None,
         }
 
-    avg_intake = float(usable["calories_kcal"].mean())
-    avg_exp = float(usable["expenditure_kcal"].mean())
-    avg_steps = float(usable["steps"].mean())
+    timing = _meal_window_status(profile)
+    # Para promedios semanales no tratamos el día actual como terminado mientras
+    # aún esté dentro (o antes) del rango habitual de comidas. Así una mañana
+    # con pocas calorías no crea un "déficit diario" ficticio.
+    completed = usable[usable["day"] < end_day].copy()
+    if timing["status"] == "after":
+        completed = pd.concat([completed, usable[usable["day"] == end_day]], ignore_index=True)
+
+    basis = completed if not completed.empty else usable.copy()
+    avg_intake = float(basis["calories_kcal"].mean())
+    avg_exp = float(basis["expenditure_kcal"].mean())
+    avg_steps = float(basis["steps"].mean())
     strength_total = float(usable["strength_minutes"].sum())
-    avg_protein = float(usable["protein_g"].mean())
+    avg_protein = float(basis["protein_g"].mean())
+
+    today_rows = usable[usable["day"] == end_day]
+    today_consumed = float(today_rows["calories_kcal"].sum()) if not today_rows.empty else 0.0
+    today_expenditure = float(today_rows["expenditure_kcal"].iloc[-1]) if not today_rows.empty else None
+    today_deficit_so_far = (today_expenditure - today_consumed) if today_expenditure is not None else None
 
     behavior_projection = behavior_projection_from_energy_balance(
         current_weight_kg=current_weight,
@@ -677,7 +782,7 @@ def _weekly_behavior_summary(sb, uid, profile, measurements, days=7):
         avg_intake_kcal=avg_intake,
         avg_expenditure_kcal=avg_exp,
         as_of=end_day,
-        valid_days=len(usable),
+        valid_days=len(basis),
         min_valid_days=4,
     )
 
@@ -685,12 +790,18 @@ def _weekly_behavior_summary(sb, uid, profile, measurements, days=7):
         "days": rdf,
         "valid_nutrition_days": len(rdf),
         "valid_activity_days": int(rdf["activity_logged"].sum()),
+        "weekly_balance_days": len(completed),
         "avg_intake_kcal": avg_intake,
         "avg_expenditure_kcal": avg_exp,
         "avg_deficit_kcal_day": avg_exp - avg_intake,
         "avg_steps": avg_steps,
         "strength_minutes_total": strength_total,
         "avg_protein_g": avg_protein,
+        "today_consumed_kcal": today_consumed,
+        "today_expenditure_kcal": today_expenditure,
+        "today_deficit_so_far": today_deficit_so_far,
+        "today_complete": timing["status"] == "after",
+        "meal_timing": timing,
         "projection": behavior_projection,
     }
 
@@ -717,26 +828,61 @@ def behavior_summary_card(sb, uid, profile, measurements):
         )
         return
 
-    deficit = summary.get('avg_deficit_kcal_day', 0)
+    deficit = summary.get("avg_deficit_kcal_day", 0)
+    balance_days = int(summary.get("weekly_balance_days", 0))
+    basis_note = f"{balance_days} día(s) cerrado(s)" if balance_days > 0 else "provisional: día actual en curso"
+    deficit_note = "solo días ya cerrados" if balance_days > 0 else "provisional; aún no es cierre diario"
     cards = "".join([
-        _metric_card("Consumo promedio", f"{summary.get('avg_intake_kcal', 0):.0f} kcal", "días con comidas registradas"),
+        _metric_card("Consumo promedio", f"{summary.get('avg_intake_kcal', 0):.0f} kcal", basis_note),
         _metric_card("Gasto estimado", f"{summary.get('avg_expenditure_kcal', 0):.0f} kcal", "base + actividad registrada"),
-        _metric_card("Déficit estimado", f"{deficit:+.0f} kcal/día", "válido si el registro del día está completo"),
-        _metric_card("Pasos promedio", f"{summary.get('avg_steps', 0):,.0f}".replace(",", "."), "promedio de días analizados"),
+        _metric_card("Déficit promedio", f"{deficit:+.0f} kcal/día", deficit_note),
+        _metric_card("Pasos promedio", f"{summary.get('avg_steps', 0):,.0f}".replace(",", "."), basis_note),
         _metric_card("Fuerza semanal", f"{summary.get('strength_minutes_total', 0):.0f} min", "minutos acumulados"),
-        _metric_card("Proteína promedio", f"{summary.get('avg_protein_g', 0):.0f} g/día", "promedio registrado"),
+        _metric_card("Proteína promedio", f"{summary.get('avg_protein_g', 0):.0f} g/día", basis_note),
     ])
     st.markdown(f"<div class='vj-metrics-grid'>{cards}</div>", unsafe_allow_html=True)
 
     st.caption(
         f"Nutrición registrada: {summary.get('valid_nutrition_days', 0)}/7 días · "
-        f"Actividad registrada: {summary.get('valid_activity_days', 0)}/7 días."
+        f"Actividad registrada: {summary.get('valid_activity_days', 0)}/7 días. "
+        "El día actual no se mezcla con el promedio hasta que termina tu rango habitual de comidas."
     )
 
-    if deficit > 1200:
+    timing = summary.get("meal_timing") or _meal_window_status(profile)
+    today_deficit = summary.get("today_deficit_so_far")
+    if today_deficit is not None:
+        now_txt = timing["now"].strftime("%H:%M")
+        window_txt = timing["window_label"]
+        fasting_txt = " · ayuno intermitente activo" if timing.get("fasting") else ""
+
+        if timing["status"] == "before":
+            st.info(
+                f"A las {now_txt}, el balance acumulado de hoy es {today_deficit:+.0f} kcal. "
+                f"Tu rango habitual de comidas comienza a las {timing['start'].strftime('%H:%M')} "
+                f"({window_txt}){fasting_txt}. No lo interpreto todavía como déficit diario final."
+            )
+        elif timing["status"] == "within":
+            st.info(
+                f"A las {now_txt}, llevas un balance acumulado de {today_deficit:+.0f} kcal. "
+                f"Aún estás dentro de tu rango de comidas {window_txt}{fasting_txt}, por lo que "
+                "este valor es real hasta este momento, pero no representa todavía el déficit final del día."
+            )
+        else:
+            st.caption(
+                f"Tu rango habitual de comidas {window_txt} ya terminó. El balance de hoy puede interpretarse "
+                "como cierre del día si registraste todas las comidas, bebidas, aceites y porciones."
+            )
+            if today_deficit > 1200:
+                st.warning(
+                    "El déficit de hoy, ya fuera de tu rango habitual de comidas, es muy alto. "
+                    "Revisa si faltan comidas, bebidas, aceites o porciones por registrar antes de tomarlo como definitivo."
+                )
+
+    # Un warning semanal solo se levanta usando días cerrados; nunca por una mañana incompleta.
+    if balance_days > 0 and deficit > 1200:
         st.warning(
-            "El déficit aparente es muy alto. Antes de interpretarlo como real, revisa si faltan "
-            "comidas, bebidas, aceites o porciones por registrar."
+            "El déficit promedio de los días ya cerrados es muy alto. Revisa que esos días estén completos "
+            "antes de interpretarlo como tu déficit habitual."
         )
 
     bp = summary.get("projection")
@@ -754,6 +900,7 @@ def behavior_summary_card(sb, uid, profile, measurements):
         )
     elif bp:
         st.info(bp.message)
+
 
 def _prepare_progress_photo(uploaded_file) -> bytes:
     """Valida y re-codifica la foto para reducir tamaño y eliminar EXIF/metadatos."""
@@ -1071,6 +1218,17 @@ def onboarding(sb, uid, email):
         sex = st.selectbox("Sexo para estimación metabólica (opcional)", ["No indicar", "Hombre", "Mujer"])
         activity = st.selectbox("Actividad habitual (opcional)", ["Sedentario","Ligero","Moderado","Alto","Muy alto"])
         reminder = st.selectbox("Día de recordatorio semanal", WEEKDAYS, index=date.today().weekday())
+        st.markdown("#### Horario habitual de comidas")
+        intermittent_fasting = st.checkbox(
+            "¿Haces ayuno intermitente?",
+            value=False,
+            help="Virgils Journey usará esta información para no interpretar una mañana en ayuno como un déficit diario final.",
+        )
+        mc1, mc2 = st.columns(2)
+        with mc1:
+            eating_window_start = st.time_input("Primera comida habitual", value=dt_time(8, 0), step=900)
+        with mc2:
+            eating_window_end = st.time_input("Última comida habitual", value=dt_time(21, 0), step=900)
         photo = st.file_uploader("Foto de progreso inicial (opcional)", type=["jpg", "jpeg", "png", "webp"], key="onboarding_photo", help="Máximo 6 MB. La app elimina metadatos EXIF/GPS antes de guardarla.")
         consent = st.checkbox("Entiendo que las proyecciones son estimaciones orientativas y no reemplazan atención médica.")
         submit = st.form_submit_button("Comenzar mi Journey", use_container_width=True)
@@ -1085,7 +1243,10 @@ def onboarding(sb, uid, email):
             "age": int(age), "height_cm": float(height),
             "goal_weight_kg": float(goal), "reminder_weekday": WEEKDAYS.index(reminder),
             "sex": None if sex == "No indicar" else sex, "activity_level": activity,
-            "timezone": "America/Santiago"
+            "timezone": "America/Santiago",
+            "intermittent_fasting": bool(intermittent_fasting),
+            "eating_window_start": eating_window_start.strftime("%H:%M:%S"),
+            "eating_window_end": eating_window_end.strftime("%H:%M:%S")
         }).execute()
         sb.table("measurements").insert({
             "user_id": uid, "measured_on": str(date.today()), "weight_kg": float(weight),
@@ -1289,16 +1450,25 @@ def _daily_coach_context(logs, profile, current_weight, expenditure_kcal, activi
             "fat_g": float(row.get("fat_g") or 0),
         })
 
+    timing = _meal_window_status(profile)
     return {
         **totals,
         **targets,
         "remaining_kcal": targets["calorie_target_kcal"] - totals["consumed_kcal"],
         "remaining_protein_g": max(0.0, targets["protein_target_g"] - totals["protein_g"]),
+        "apparent_deficit_so_far": float(expenditure_kcal) - totals["consumed_kcal"],
         "expenditure_kcal": float(expenditure_kcal),
         "steps": int(act.get("steps") or 0),
         "strength_minutes": int(act.get("strength_minutes") or 0),
         "strength_intensity": str(act.get("strength_intensity") or "Moderado"),
         "activity_notes": str(act.get("notes") or ""),
+        "current_local_time": timing["now"].strftime("%H:%M"),
+        "meal_window_start": timing["start"].strftime("%H:%M"),
+        "meal_window_end": timing["end"].strftime("%H:%M"),
+        "meal_window_status": timing["status"],
+        "meal_window_elapsed_pct": round(timing["elapsed_fraction"] * 100, 1),
+        "intermittent_fasting": bool(timing.get("fasting")),
+        "meal_schedule_configured": bool(timing.get("configured")),
         "meals": meals,
     }
 
@@ -1315,9 +1485,36 @@ def _render_ai_daily_coach(context, result=None):
     c3.metric("Disponible", rem_label)
     _render_progress("Calorías", context["consumed_kcal"], context["calorie_target_kcal"], "kcal")
     _render_progress("Proteína", context["protein_g"], context["protein_target_g"], "g")
+
+    status = context.get("meal_window_status", "within")
+    now_txt = context.get("current_local_time", "")
+    start_txt = context.get("meal_window_start", "08:00")
+    end_txt = context.get("meal_window_end", "21:00")
+    fasting = bool(context.get("intermittent_fasting"))
+    apparent = float(context.get("apparent_deficit_so_far") or 0)
+    fasting_txt = " con ayuno intermitente" if fasting else ""
+
+    if status == "before":
+        st.info(
+            f"Son las {now_txt}. Tu rango habitual de comidas es {start_txt}–{end_txt}{fasting_txt}. "
+            f"El balance acumulado hasta ahora es {apparent:+.0f} kcal, pero todavía no corresponde interpretarlo "
+            "como déficit diario porque tu ventana de alimentación aún no comienza."
+        )
+    elif status == "within":
+        st.info(
+            f"Son las {now_txt} y aún estás dentro de tu rango habitual de comidas {start_txt}–{end_txt}{fasting_txt}. "
+            f"Tu balance acumulado hasta este momento es {apparent:+.0f} kcal: es el valor real hasta ahora, "
+            "pero puede cambiar con las siguientes comidas del día."
+        )
+    else:
+        st.caption(
+            f"Tu rango habitual de comidas {start_txt}–{end_txt}{fasting_txt} ya terminó. "
+            "Si registraste todo lo consumido, el balance de hoy ya puede considerarse cercano al cierre diario."
+        )
+
     st.caption(
         f"Déficit objetivo orientativo: ~{context['target_deficit_kcal']:.0f} kcal/día · "
-        "se ajusta al gasto estimado y evita usar como meta un déficit extremo por registros incompletos."
+        "la IA considera la hora actual y tu rango habitual de comidas antes de marcar un registro como incompleto."
     )
 
     if not result:
@@ -1348,6 +1545,67 @@ def _render_ai_daily_coach(context, result=None):
         st.caption(f"Análisis generado por {result['provider']}. Las cifras son estimaciones orientativas.")
 
 
+def _meal_schedule_form(sb, uid, profile, key_prefix="meal_schedule", compact=False):
+    schedule = _meal_window(profile)
+    if not schedule["configured"]:
+        st.info(
+            "Para interpretar correctamente tu balance según la hora, indícame si haces ayuno intermitente "
+            "y cuál es tu rango habitual de comidas. Se guardará en tu perfil y la IA lo usará desde ahora."
+        )
+
+    title = "Horario de alimentación" if compact else "Tu horario de alimentación"
+    st.markdown(f"### {title}")
+    st.caption(
+        "Esto evita que Virgils Journey trate una mañana con pocas calorías como si el día ya hubiera terminado."
+    )
+
+    with st.form(f"{key_prefix}_form", clear_on_submit=False):
+        fasting = st.checkbox(
+            "¿Haces ayuno intermitente?",
+            value=bool(schedule["fasting"]),
+            help="Solo se usa para interpretar el momento del día y adaptar las sugerencias; no cambia por sí solo tu meta calórica.",
+        )
+        c1, c2 = st.columns(2)
+        with c1:
+            start_time = st.time_input(
+                "Primera comida habitual",
+                value=schedule["start"],
+                step=900,
+                key=f"{key_prefix}_start",
+            )
+        with c2:
+            end_time = st.time_input(
+                "Última comida habitual",
+                value=schedule["end"],
+                step=900,
+                key=f"{key_prefix}_end",
+            )
+        st.caption(
+            "Ejemplo: si comes entre 12:00 y 20:00, antes de las 12:00 la app entenderá que aún estás en ayuno; "
+            "a las 16:00 evaluará solo cómo vas hasta ese momento; después de las 20:00 podrá tratar el día como cercano al cierre."
+        )
+        save_schedule = st.form_submit_button(
+            "💾 Guardar horario de alimentación",
+            use_container_width=True,
+            type="primary" if not schedule["configured"] else "secondary",
+        )
+
+    if save_schedule:
+        try:
+            sb.table("profiles").update({
+                "intermittent_fasting": bool(fasting),
+                "eating_window_start": start_time.strftime("%H:%M:%S"),
+                "eating_window_end": end_time.strftime("%H:%M:%S"),
+            }).eq("user_id", uid).execute()
+            st.toast("Horario de alimentación guardado.", icon="✅")
+            st.rerun()
+        except Exception as exc:
+            st.error(
+                "No fue posible guardar el horario. Ejecuta primero la migración SQL que agrega "
+                f"intermittent_fasting, eating_window_start y eating_window_end. Detalle: {exc}"
+            )
+
+
 def nutrition_page(sb, uid, profile, measurements):
     st.markdown("## Nutrición y actividad")
     st.caption(
@@ -1355,8 +1613,12 @@ def nutrition_page(sb, uid, profile, measurements):
         "y las proyecciones son estimaciones orientativas."
     )
 
-    today = date.today()
+    today = _local_now(profile).date()
     last_weight = _latest_weight(measurements)
+
+    # Configuración horaria: imprescindible para interpretar un déficit "hasta ahora".
+    _meal_schedule_form(sb, uid, profile, key_prefix="nutrition_meal_schedule", compact=True)
+    st.divider()
 
     # --------------------------
     # Actividad del día
@@ -1778,6 +2040,9 @@ def settings_page(sb, uid, profile):
             st.rerun()
         except Exception as e:
             st.error(f"No fue posible guardar las preferencias: {e}")
+
+    st.divider()
+    _meal_schedule_form(sb, uid, fresh_profile, key_prefix="settings_meal_schedule", compact=False)
 
     # ------------------------------------------------------------------
     # INFORMACIÓN
