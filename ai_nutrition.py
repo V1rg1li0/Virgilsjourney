@@ -320,3 +320,180 @@ def estimate_with_gemini(
         gemini_api_key=api_key,
         gemini_model=model,
     )
+
+
+
+def _daily_guidance_prompt(context: dict[str, Any]) -> str:
+    meals = context.get("meals") or []
+    meals_text = "\n".join(
+        f"- {m.get('description','Comida')}: {m.get('calories_kcal',0):.0f} kcal, "
+        f"{m.get('protein_g',0):.0f} g proteína, {m.get('carbs_g',0):.0f} g carbos, "
+        f"{m.get('fat_g',0):.0f} g grasas"
+        for m in meals
+    ) or "- Aún no hay comidas registradas."
+
+    return f"""
+Eres el coach nutricional de Virgils Journey. Tu tarea es analizar el día ACTUAL
+con datos ya calculados por la aplicación y sugerir próximas comidas prácticas.
+No diagnostiques ni sustituyas consejo médico. No propongas ayunos extremos,
+castigos con ejercicio ni déficits mayores al objetivo entregado por la app.
+
+DATOS DEL DÍA
+- Calorías consumidas: {context.get('consumed_kcal',0):.0f} kcal
+- Proteína consumida: {context.get('protein_g',0):.0f} g
+- Carbohidratos consumidos: {context.get('carbs_g',0):.0f} g
+- Grasas consumidas: {context.get('fat_g',0):.0f} g
+- Gasto estimado: {context.get('expenditure_kcal',0):.0f} kcal
+- Déficit objetivo: {context.get('target_deficit_kcal',0):.0f} kcal
+- Presupuesto calórico del día: {context.get('calorie_target_kcal',0):.0f} kcal
+- Calorías aproximadas disponibles: {context.get('remaining_kcal',0):.0f} kcal
+- Meta de proteína orientativa: {context.get('protein_target_g',0):.0f} g
+- Proteína faltante aproximada: {context.get('remaining_protein_g',0):.0f} g
+- Pasos: {context.get('steps',0)}
+- Fuerza: {context.get('strength_minutes',0)} min ({context.get('strength_intensity','Moderado')})
+- Notas de actividad: {context.get('activity_notes','') or 'Sin notas'}
+
+COMIDAS REGISTRADAS
+{meals_text}
+
+REGLAS
+1. Evalúa si el registro parece incompleto antes de concluir que existe un déficit muy alto.
+2. Prioriza completar proteína, fibra, verduras/frutas y saciedad sin superar innecesariamente el presupuesto.
+3. Sugiere 2 o 3 opciones de próxima comida fáciles de conseguir/preparar en Chile/Latinoamérica.
+4. Cada opción debe incluir kcal aproximadas y proteína aproximada.
+5. Si quedan pocas calorías, no recomiendes saltarse comidas; propone una opción pequeña y nutritiva.
+6. Si ya se superó el presupuesto, propone una siguiente comida moderada y equilibrada, sin compensaciones extremas.
+7. Sé breve, concreto y accionable.
+8. Devuelve SOLO JSON válido, sin markdown.
+
+FORMATO JSON EXACTO
+{{
+  "status": "bien|atencion|incompleto",
+  "headline": "frase de máximo 12 palabras",
+  "analysis": "2 a 4 frases breves",
+  "next_meals": [
+    {{"name":"...", "kcal":0, "protein_g":0, "reason":"..."}},
+    {{"name":"...", "kcal":0, "protein_g":0, "reason":"..."}}
+  ],
+  "activity_note": "1 frase sobre pasos/fuerza y cómo encajan hoy",
+  "warning": "mensaje breve si el registro parece incompleto; de lo contrario cadena vacía"
+}}
+""".strip()
+
+
+def _normalize_guidance(data: dict[str, Any], provider: str) -> dict[str, Any]:
+    status = str(data.get("status") or "bien").strip().lower()
+    if status not in {"bien", "atencion", "incompleto"}:
+        status = "bien"
+
+    meals_out = []
+    for item in (data.get("next_meals") or [])[:3]:
+        if not isinstance(item, dict):
+            continue
+        meals_out.append({
+            "name": str(item.get("name") or "Opción equilibrada").strip(),
+            "kcal": max(0, _to_int(item.get("kcal"))),
+            "protein_g": max(0.0, round(_to_float(item.get("protein_g")), 1)),
+            "reason": str(item.get("reason") or "").strip(),
+        })
+
+    return {
+        "status": status,
+        "headline": str(data.get("headline") or "Balance del día").strip(),
+        "analysis": str(data.get("analysis") or "").strip(),
+        "next_meals": meals_out,
+        "activity_note": str(data.get("activity_note") or "").strip(),
+        "warning": str(data.get("warning") or "").strip(),
+        "provider": provider,
+    }
+
+
+def _try_gemini_guidance(prompt: str, api_key: str, model: str) -> dict[str, Any]:
+    client = genai.Client(api_key=api_key.strip())
+    last_error: Exception | None = None
+    for attempt in range(GEMINI_ATTEMPTS):
+        try:
+            response = client.models.generate_content(model=model, contents=prompt)
+            text = getattr(response, "text", None) or ""
+            return _normalize_guidance(_extract_json(text), f"Gemini · {model}")
+        except Exception as exc:
+            last_error = exc
+            if attempt < GEMINI_ATTEMPTS - 1 and _is_transient_error(exc):
+                time.sleep(1.0 + random.uniform(0.2, 0.8))
+                continue
+            raise
+    raise last_error or RuntimeError("Gemini no respondió.")
+
+
+def _try_openrouter_guidance(prompt: str, api_key: str, model: str) -> dict[str, Any]:
+    headers = {
+        "Authorization": f"Bearer {api_key.strip()}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://virgilsjourney.streamlit.app",
+        "X-Title": "Virgils Journey",
+    }
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "Responde únicamente con JSON válido."},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.25,
+    }
+    last_error: Exception | None = None
+    for attempt in range(OPENROUTER_ATTEMPTS):
+        try:
+            response = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=45)
+            if response.status_code >= 400:
+                raise RuntimeError(f"OpenRouter HTTP {response.status_code}: {response.text[:1200]}")
+            data = response.json()
+            choices = data.get("choices") or []
+            if not choices:
+                raise RuntimeError("OpenRouter no devolvió una respuesta utilizable.")
+            content = choices[0].get("message", {}).get("content", "")
+            if isinstance(content, list):
+                content = "\n".join(
+                    str(x.get("text", "")) if isinstance(x, dict) else str(x)
+                    for x in content
+                )
+            return _normalize_guidance(_extract_json(str(content)), f"OpenRouter · {model}")
+        except Exception as exc:
+            last_error = exc
+            if attempt < OPENROUTER_ATTEMPTS - 1 and _is_transient_error(exc):
+                time.sleep((1.5 * (attempt + 1)) + random.uniform(0.2, 0.8))
+                continue
+            raise
+    raise last_error or RuntimeError("OpenRouter no respondió.")
+
+
+def analyze_daily_balance(
+    context: dict[str, Any],
+    gemini_api_key: str = "",
+    gemini_model: str = DEFAULT_GEMINI_MODEL,
+    openrouter_api_key: str = "",
+    openrouter_model: str = DEFAULT_OPENROUTER_MODEL,
+) -> dict[str, Any]:
+    """Analiza el balance del día y sugiere próximas comidas con fallback de proveedor."""
+    if not str(gemini_api_key or "").strip() and not str(openrouter_api_key or "").strip():
+        raise ValueError("No hay ningún proveedor de IA configurado.")
+
+    prompt = _daily_guidance_prompt(context)
+    errors: list[str] = []
+
+    if str(gemini_api_key or "").strip():
+        try:
+            return _try_gemini_guidance(prompt, gemini_api_key, gemini_model or DEFAULT_GEMINI_MODEL)
+        except Exception as exc:
+            errors.append(f"Gemini: {exc}")
+
+    if str(openrouter_api_key or "").strip():
+        try:
+            return _try_openrouter_guidance(prompt, openrouter_api_key, openrouter_model or DEFAULT_OPENROUTER_MODEL)
+        except Exception as exc:
+            errors.append(f"OpenRouter: {exc}")
+
+    detail = " | ".join(errors[-2:])
+    raise RuntimeError(
+        "No fue posible generar el análisis del día en este momento."
+        + (f" Detalle técnico: {detail}" if detail else "")
+    )

@@ -31,7 +31,7 @@ from analytics import (
     behavior_projection_from_energy_balance,
 )
 from db import configured, client, sign_in, sign_up, sign_out, sign_in_with_google_tokens
-from ai_nutrition import estimate_nutrition
+from ai_nutrition import estimate_nutrition, analyze_daily_balance
 
 st.set_page_config(page_title="Virgils Journey", page_icon="⚫", layout="centered")
 
@@ -338,6 +338,41 @@ a{
         padding:.55rem .45rem;
     }
 }
+
+
+/* Métricas compactas para evitar textos cortados */
+.vj-metrics-grid{
+    display:grid;
+    grid-template-columns:repeat(3,minmax(0,1fr));
+    gap:14px;
+    margin:8px 0 14px 0;
+}
+.vj-metric-card{
+    min-width:0;
+    padding:16px 16px 14px 16px;
+    border:1px solid var(--border);
+    border-radius:18px;
+    background:rgba(255,255,255,.94);
+    box-shadow:0 5px 18px rgba(0,0,0,.06);
+}
+.vj-metric-label{font-size:.90rem;color:#454545;margin-bottom:6px;line-height:1.2;}
+.vj-metric-value{font-size:1.72rem;font-weight:700;letter-spacing:-.03em;line-height:1.05;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.vj-metric-note{font-size:.76rem;color:var(--muted);margin-top:7px;line-height:1.25;}
+.vj-coach-card{
+    border:1px solid var(--border);border-radius:20px;background:#fff;
+    padding:18px 18px 14px 18px;margin:12px 0 10px 0;
+    box-shadow:0 7px 22px rgba(0,0,0,.06);
+}
+.vj-coach-title{font-size:1.08rem;font-weight:750;margin-bottom:6px;}
+.vj-coach-text{font-size:.94rem;line-height:1.45;color:#2c2c2c;}
+.vj-progress-label{display:flex;justify-content:space-between;gap:12px;font-size:.84rem;margin-bottom:5px;color:#444;}
+.vj-progress-track{width:100%;height:9px;background:#ECECEC;border-radius:999px;overflow:hidden;margin-bottom:12px;}
+.vj-progress-fill{height:100%;background:#222;border-radius:999px;}
+@media (max-width: 680px){
+    .vj-metrics-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;}
+    .vj-metric-value{font-size:1.45rem;}
+}
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -660,6 +695,16 @@ def _weekly_behavior_summary(sb, uid, profile, measurements, days=7):
     }
 
 
+def _metric_card(label, value, note=""):
+    return (
+        "<div class='vj-metric-card'>"
+        f"<div class='vj-metric-label'>{html.escape(str(label))}</div>"
+        f"<div class='vj-metric-value'>{html.escape(str(value))}</div>"
+        f"<div class='vj-metric-note'>{html.escape(str(note))}</div>"
+        "</div>"
+    )
+
+
 def behavior_summary_card(sb, uid, profile, measurements):
     summary = _weekly_behavior_summary(sb, uid, profile, measurements, days=7)
 
@@ -672,20 +717,27 @@ def behavior_summary_card(sb, uid, profile, measurements):
         )
         return
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Consumo promedio", f"{summary.get('avg_intake_kcal', 0):.0f} kcal")
-    c2.metric("Gasto estimado", f"{summary.get('avg_expenditure_kcal', 0):.0f} kcal")
-    c3.metric("Balance promedio", f"{summary.get('avg_deficit_kcal_day', 0):+.0f} kcal/día")
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Pasos promedio", f"{summary.get('avg_steps', 0):,.0f}".replace(",", "."))
-    c2.metric("Fuerza semanal", f"{summary.get('strength_minutes_total', 0):.0f} min")
-    c3.metric("Proteína promedio", f"{summary.get('avg_protein_g', 0):.0f} g/día")
+    deficit = summary.get('avg_deficit_kcal_day', 0)
+    cards = "".join([
+        _metric_card("Consumo promedio", f"{summary.get('avg_intake_kcal', 0):.0f} kcal", "días con comidas registradas"),
+        _metric_card("Gasto estimado", f"{summary.get('avg_expenditure_kcal', 0):.0f} kcal", "base + actividad registrada"),
+        _metric_card("Déficit estimado", f"{deficit:+.0f} kcal/día", "válido si el registro del día está completo"),
+        _metric_card("Pasos promedio", f"{summary.get('avg_steps', 0):,.0f}".replace(",", "."), "promedio de días analizados"),
+        _metric_card("Fuerza semanal", f"{summary.get('strength_minutes_total', 0):.0f} min", "minutos acumulados"),
+        _metric_card("Proteína promedio", f"{summary.get('avg_protein_g', 0):.0f} g/día", "promedio registrado"),
+    ])
+    st.markdown(f"<div class='vj-metrics-grid'>{cards}</div>", unsafe_allow_html=True)
 
     st.caption(
         f"Nutrición registrada: {summary.get('valid_nutrition_days', 0)}/7 días · "
         f"Actividad registrada: {summary.get('valid_activity_days', 0)}/7 días."
     )
+
+    if deficit > 1200:
+        st.warning(
+            "El déficit aparente es muy alto. Antes de interpretarlo como real, revisa si faltan "
+            "comidas, bebidas, aceites o porciones por registrar."
+        )
 
     bp = summary.get("projection")
     if bp and bp.ready:
@@ -702,7 +754,6 @@ def behavior_summary_card(sb, uid, profile, measurements):
         )
     elif bp:
         st.info(bp.message)
-
 
 def _prepare_progress_photo(uploaded_file) -> bytes:
     """Valida y re-codifica la foto para reducir tamaño y eliminar EXIF/metadatos."""
@@ -1176,6 +1227,127 @@ def measurement_form(sb, uid, measurements):
     support_card()
 
 
+
+def _daily_targets(profile, current_weight, expenditure_kcal):
+    """Objetivos orientativos del día, sin requerir nuevas columnas en la base de datos."""
+    if not expenditure_kcal:
+        return None
+
+    # Déficit moderado y adaptativo: 15% del gasto, acotado entre 350 y 700 kcal/día.
+    target_deficit = min(700.0, max(350.0, float(expenditure_kcal) * 0.15))
+
+    sex = str(profile.get("sex") or "").strip().lower()
+    floor = 1500.0 if sex == "masculino" else 1200.0 if sex == "femenino" else 1350.0
+    calorie_target = max(floor, float(expenditure_kcal) - target_deficit)
+    target_deficit = max(0.0, float(expenditure_kcal) - calorie_target)
+
+    goal_weight = float(profile.get("goal_weight_kg") or current_weight or 0)
+    reference_weight = goal_weight if goal_weight > 0 else float(current_weight or 0)
+    protein_target = max(70.0, reference_weight * 1.6) if reference_weight else 100.0
+
+    return {
+        "target_deficit_kcal": target_deficit,
+        "calorie_target_kcal": calorie_target,
+        "protein_target_g": protein_target,
+    }
+
+
+def _render_progress(label, current, target, unit=""):
+    target = max(float(target or 0), 1.0)
+    current = max(float(current or 0), 0.0)
+    pct = min(100.0, current / target * 100.0)
+    st.markdown(
+        f"<div class='vj-progress-label'><span>{html.escape(label)}</span>"
+        f"<strong>{current:.0f} / {target:.0f} {html.escape(unit)}</strong></div>"
+        f"<div class='vj-progress-track'><div class='vj-progress-fill' style='width:{pct:.1f}%'></div></div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _daily_coach_context(logs, profile, current_weight, expenditure_kcal, activity_row=None):
+    if logs is None or logs.empty or not expenditure_kcal:
+        return None
+
+    totals = {
+        "consumed_kcal": float(logs["calories_kcal"].fillna(0).sum()),
+        "protein_g": float(logs["protein_g"].fillna(0).sum()),
+        "carbs_g": float(logs["carbs_g"].fillna(0).sum()),
+        "fat_g": float(logs["fat_g"].fillna(0).sum()),
+    }
+    targets = _daily_targets(profile, current_weight, expenditure_kcal)
+    if not targets:
+        return None
+
+    act = activity_row or {}
+    meals = []
+    for _, row in logs.iterrows():
+        meals.append({
+            "description": str(row.get("description") or "Comida"),
+            "calories_kcal": float(row.get("calories_kcal") or 0),
+            "protein_g": float(row.get("protein_g") or 0),
+            "carbs_g": float(row.get("carbs_g") or 0),
+            "fat_g": float(row.get("fat_g") or 0),
+        })
+
+    return {
+        **totals,
+        **targets,
+        "remaining_kcal": targets["calorie_target_kcal"] - totals["consumed_kcal"],
+        "remaining_protein_g": max(0.0, targets["protein_target_g"] - totals["protein_g"]),
+        "expenditure_kcal": float(expenditure_kcal),
+        "steps": int(act.get("steps") or 0),
+        "strength_minutes": int(act.get("strength_minutes") or 0),
+        "strength_intensity": str(act.get("strength_intensity") or "Moderado"),
+        "activity_notes": str(act.get("notes") or ""),
+        "meals": meals,
+    }
+
+
+def _render_ai_daily_coach(context, result=None):
+    if not context:
+        return
+    remaining = context["remaining_kcal"]
+    rem_label = f"{remaining:.0f} kcal" if remaining >= 0 else f"{abs(remaining):.0f} kcal sobre objetivo"
+    st.markdown("### Balance inteligente de hoy")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Objetivo de hoy", f"{context['calorie_target_kcal']:.0f} kcal")
+    c2.metric("Consumido", f"{context['consumed_kcal']:.0f} kcal")
+    c3.metric("Disponible", rem_label)
+    _render_progress("Calorías", context["consumed_kcal"], context["calorie_target_kcal"], "kcal")
+    _render_progress("Proteína", context["protein_g"], context["protein_target_g"], "g")
+    st.caption(
+        f"Déficit objetivo orientativo: ~{context['target_deficit_kcal']:.0f} kcal/día · "
+        "se ajusta al gasto estimado y evita usar como meta un déficit extremo por registros incompletos."
+    )
+
+    if not result:
+        return
+
+    warning = result.get("warning") or ""
+    body = (
+        f"<div class='vj-coach-card'><div class='vj-coach-title'>🤖 {html.escape(result.get('headline') or 'Análisis del día')}</div>"
+        f"<div class='vj-coach-text'>{html.escape(result.get('analysis') or '')}</div></div>"
+    )
+    st.markdown(body, unsafe_allow_html=True)
+    if warning:
+        st.warning(warning)
+
+    options = result.get("next_meals") or []
+    if options:
+        st.markdown("**Qué podrías comer después**")
+        cols = st.columns(min(3, len(options)))
+        for col, meal in zip(cols, options):
+            with col:
+                st.markdown(f"**{meal.get('name','Opción')}**")
+                st.caption(f"≈ {meal.get('kcal',0)} kcal · {meal.get('protein_g',0):.0f} g proteína")
+                if meal.get("reason"):
+                    st.write(meal["reason"])
+    if result.get("activity_note"):
+        st.info(result["activity_note"])
+    if result.get("provider"):
+        st.caption(f"Análisis generado por {result['provider']}. Las cifras son estimaciones orientativas.")
+
+
 def nutrition_page(sb, uid, profile, measurements):
     st.markdown("## Nutrición y actividad")
     st.caption(
@@ -1367,6 +1539,7 @@ def nutrition_page(sb, uid, profile, measurements):
             }
         ).execute()
         st.session_state.pop("ai_food", None)
+        st.session_state["refresh_daily_coach"] = True
         st.rerun()
 
     logs = load_nutrition(sb, uid, today)
@@ -1388,6 +1561,64 @@ def nutrition_page(sb, uid, profile, measurements):
             hide_index=True,
         )
 
+        # Balance diario + coach IA
+        activity_row = today_activity.iloc[-1].to_dict() if not today_activity.empty else {}
+        exp_today = None
+        if last_weight:
+            exp_detail = daily_expenditure_with_activity(
+                weight_kg=last_weight,
+                height_cm=float(profile["height_cm"]),
+                age=int(profile["age"]),
+                sex=profile.get("sex") or "",
+                steps=int(activity_row.get("steps") or 0),
+                strength_minutes=int(activity_row.get("strength_minutes") or 0),
+                strength_intensity=activity_row.get("strength_intensity") or "Moderado",
+            )
+            if exp_detail:
+                exp_today = float(exp_detail["total_kcal"])
+            else:
+                exp_today = tdee_estimate(
+                    last_weight,
+                    float(profile["height_cm"]),
+                    int(profile["age"]),
+                    profile.get("sex") or "",
+                    profile.get("activity_level") or "Sedentario",
+                )
+
+        coach_context = _daily_coach_context(
+            logs, profile, last_weight, exp_today, activity_row=activity_row
+        )
+
+        coach_result = st.session_state.get("daily_coach_result")
+        coach_day = st.session_state.get("daily_coach_day")
+        if coach_day != str(today):
+            coach_result = None
+
+        auto_refresh = bool(st.session_state.pop("refresh_daily_coach", False))
+        analyze_now = False
+        if ai_enabled and coach_context:
+            if auto_refresh:
+                analyze_now = True
+            elif st.button("🤖 Actualizar análisis y próxima comida", use_container_width=True):
+                analyze_now = True
+
+        if analyze_now:
+            try:
+                with st.spinner("Analizando comidas, actividad y balance del día..."):
+                    coach_result = analyze_daily_balance(
+                        context=coach_context,
+                        gemini_api_key=gemini_key,
+                        gemini_model=st.secrets.get("GEMINI_MODEL", "gemini-3.6-flash"),
+                        openrouter_api_key=openrouter_key,
+                        openrouter_model=st.secrets.get("OPENROUTER_MODEL", "openrouter/free"),
+                    )
+                st.session_state["daily_coach_result"] = coach_result
+                st.session_state["daily_coach_day"] = str(today)
+            except Exception as exc:
+                st.warning(f"No fue posible generar el análisis IA del día: {exc}")
+
+        _render_ai_daily_coach(coach_context, coach_result)
+
     behavior_summary_card(sb, uid, profile, measurements)
 
     st.caption(
@@ -1401,83 +1632,6 @@ def nutrition_page(sb, uid, profile, measurements):
 def settings_page(sb, uid, profile):
     st.markdown("## Ajustes")
 
-    # Recargar el perfil directamente desde Supabase al entrar a Ajustes.
-    # Así los campos siempre muestran el último nombre/seudónimo guardado.
-    fresh_profile = get_profile(sb, uid) or profile or {}
-
-    st.markdown("### Tu identidad en Virgils Journey")
-    st.caption(
-        "Puedes cambiar tu nombre o elegir un seudónimo. "
-        "El seudónimo tendrá prioridad en los saludos de la aplicación."
-    )
-
-    with st.form("identity_settings_form", clear_on_submit=False):
-        full_name = st.text_input(
-            "Tu nombre",
-            value=str(fresh_profile.get("full_name") or ""),
-            max_chars=80,
-            placeholder="Ej.: Virgilio Soto",
-        )
-        display_name = st.text_input(
-            "Seudónimo o nombre preferido (opcional)",
-            value=str(fresh_profile.get("display_name") or ""),
-            max_chars=40,
-            placeholder="Ej.: Virgil",
-            help="Si escribes uno, Virgils Journey usará este nombre para hablarte.",
-        )
-        save_identity = st.form_submit_button(
-            "💾 Guardar nombre y seudónimo",
-            use_container_width=True,
-            type="primary",
-        )
-
-    if save_identity:
-        clean_full_name = str(full_name or "").strip()
-        clean_display_name = str(display_name or "").strip()
-
-        if not clean_full_name:
-            st.error("Debes ingresar tu nombre antes de guardar.")
-        else:
-            try:
-                result = (
-                    sb.table("profiles")
-                    .update({
-                        "full_name": clean_full_name,
-                        "display_name": clean_display_name or None,
-                    })
-                    .eq("user_id", uid)
-                    .execute()
-                )
-
-                # Mantener también el valor actualizado en la sesión actual.
-                st.session_state["vj_full_name"] = clean_full_name
-                st.session_state["vj_display_name"] = clean_display_name
-                st.session_state["vj_preferred_name"] = clean_display_name or clean_full_name
-
-                # Verificación: leer nuevamente desde Supabase antes del rerun.
-                updated_profile = get_profile(sb, uid)
-                if not updated_profile:
-                    st.error("No pude verificar el perfil después de guardar.")
-                else:
-                    saved_full_name = str(updated_profile.get("full_name") or "").strip()
-                    saved_display_name = str(updated_profile.get("display_name") or "").strip()
-
-                    if saved_full_name != clean_full_name or saved_display_name != clean_display_name:
-                        st.error(
-                            "Supabase no devolvió los nuevos datos. Revisa que las columnas "
-                            "full_name y display_name existan y que la política RLS permita UPDATE."
-                        )
-                    else:
-                        st.toast(
-                            f"Guardado. Desde ahora te llamaré {saved_display_name or saved_full_name}.",
-                            icon="✅",
-                        )
-                        st.rerun()
-            except Exception as e:
-                st.error(f"No fue posible guardar el nombre o seudónimo: {e}")
-
-    st.divider()
-
     st.markdown("### Guía rápida")
     st.caption("Puedes volver a ver el recorrido inicial cuando quieras.")
     if st.button("Ver guía rápida", key="open_quick_guide", use_container_width=True):
@@ -1485,56 +1639,40 @@ def settings_page(sb, uid, profile):
         st.session_state["vj_replay_guide_step"] = 0
         st.rerun()
 
-    current_preferred_name = preferred_name(fresh_profile)
+    current_preferred_name = preferred_name(profile)
 
     if st.session_state.get("vj_show_quick_guide", False):
-        quick_guide(
-            new_user=False,
-            key_prefix="vj_replay_guide",
-            user_name=current_preferred_name,
-        )
+        quick_guide(new_user=False, key_prefix="vj_replay_guide", user_name=current_preferred_name)
         st.divider()
 
-    st.markdown("### Preferencias")
-    with st.form("settings_preferences_form", clear_on_submit=False):
-        goal = st.number_input(
-            "Meta de peso (kg)",
-            35.0,
-            300.0,
-            float(fresh_profile["goal_weight_kg"]),
-            0.1,
+    with st.form("settings"):
+        st.markdown("### Tu identidad en Virgils Journey")
+        full_name = st.text_input("Tu nombre", value=str(profile.get("full_name") or ""), max_chars=80)
+        display_name = st.text_input(
+            "Seudónimo o nombre preferido (opcional)",
+            value=str(profile.get("display_name") or ""),
+            max_chars=40,
+            help="Si lo dejas vacío, Virgils Journey usará tu nombre.",
         )
-        reminder = st.selectbox(
-            "Día de recordatorio",
-            WEEKDAYS,
-            index=int(fresh_profile.get("reminder_weekday") or 0),
-        )
-        activity_options = ["Sedentario", "Ligero", "Moderado", "Alto", "Muy alto"]
-        current_activity = fresh_profile.get("activity_level") or "Sedentario"
-        if current_activity not in activity_options:
-            current_activity = "Sedentario"
-        activity = st.selectbox(
-            "Actividad",
-            activity_options,
-            index=activity_options.index(current_activity),
-        )
-        save_preferences = st.form_submit_button(
-            "💾 Guardar preferencias",
-            use_container_width=True,
-        )
-
-    if save_preferences:
-        try:
+        goal = st.number_input("Meta de peso (kg)", 35.0, 300.0, float(profile["goal_weight_kg"]), 0.1)
+        reminder = st.selectbox("Día de recordatorio", WEEKDAYS, index=int(profile.get("reminder_weekday") or 0))
+        activity = st.selectbox("Actividad", ["Sedentario","Ligero","Moderado","Alto","Muy alto"], index=["Sedentario","Ligero","Moderado","Alto","Muy alto"].index(profile.get("activity_level") or "Sedentario"))
+        ok = st.form_submit_button("Guardar")
+    if ok:
+        clean_full_name = full_name.strip()
+        clean_display_name = display_name.strip()
+        if not clean_full_name:
+            st.warning("El nombre no puede quedar vacío.")
+        else:
             sb.table("profiles").update({
+                "full_name": clean_full_name,
+                "display_name": clean_display_name or None,
                 "goal_weight_kg": float(goal),
                 "reminder_weekday": WEEKDAYS.index(reminder),
                 "activity_level": activity,
-            }).eq("user_id", uid).execute()
-            st.toast("Preferencias guardadas.", icon="✅")
+            }).eq("user_id",uid).execute()
+            st.success(f"Ajustes guardados. Te llamaré {clean_display_name or clean_full_name}.")
             st.rerun()
-        except Exception as e:
-            st.error(f"No fue posible guardar las preferencias: {e}")
-
     st.markdown("### Metodología")
     st.write("La proyección se activa con al menos 4 mediciones distribuidas en ~4 semanas. Usa una tendencia robusta de peso (mediana de pendientes entre pares de puntos), y se actualiza con hasta las últimas 8 mediciones.")
     st.write("El rango de 1–2 lb/semana se muestra solo como referencia de pérdida gradual citada por CDC. La fecha objetivo es una estimación y puede cambiar por líquidos, adherencia, enfermedad, medicamentos, sueño y otros factores.")
