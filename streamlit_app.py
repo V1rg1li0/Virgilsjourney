@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import sys
+import base64
+from pathlib import Path
 
 # En equipos Windows corporativos puede ser necesario usar el almacén de certificados del sistema.
 # En Streamlit Cloud/Linux este bloque no hace nada.
@@ -20,30 +22,225 @@ import streamlit as st
 import plotly.graph_objects as go
 from PIL import Image, ImageOps
 
-from analytics import build_projection, bmi, tdee_estimate
+from analytics import (
+    build_projection,
+    bmi,
+    tdee_estimate,
+    daily_expenditure_with_activity,
+    behavior_projection_from_energy_balance,
+)
 from db import configured, client, sign_in, sign_up, sign_out
 from ai_nutrition import estimate_nutrition
 
-st.set_page_config(page_title="Virgils Journey", page_icon="🏃", layout="centered")
+st.set_page_config(page_title="Virgils Journey", page_icon="⚫", layout="centered")
 
 st.markdown("""
 <style>
-:root { --vj:#6E44FF; --vj2:#00A6A6; --ink:#172033; --muted:#6B7280; --card:#ffffff; }
-[data-testid="stAppViewContainer"]{background:linear-gradient(180deg,#F5F7FF 0%,#F8FBFC 100%)}
-.block-container{max-width:760px;padding-top:1rem;padding-bottom:5rem}
-.vj-hero{padding:18px 18px 16px;border-radius:24px;background:linear-gradient(135deg,#6E44FF,#8A5CFF 55%,#2CB7B0);color:white;box-shadow:0 12px 30px rgba(71,55,180,.25)}
-.vj-title{font-size:30px;font-weight:900;line-height:1.05;margin:0}.vj-sub{opacity:.9;margin-top:7px;font-size:14px}
-.vj-card{background:white;border:1px solid #E9EAF1;border-radius:20px;padding:16px;box-shadow:0 6px 18px rgba(30,42,70,.06);margin:10px 0}
-.vj-kpi{font-size:28px;font-weight:900;color:#172033}.vj-label{color:#6B7280;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em}
-.vj-good{color:#0F9D76}.vj-warn{color:#D97706}.vj-bad{color:#D64545}
-div[data-testid="stMetric"]{background:white;border:1px solid #E9EAF1;padding:12px;border-radius:18px}
-.stButton>button{border-radius:14px;font-weight:800;min-height:44px}
-.stTextInput input,.stNumberInput input,.stDateInput input{border-radius:12px}
-@media (max-width:640px){.block-container{padding-left:.75rem;padding-right:.75rem}.vj-title{font-size:26px}}
-/* Navegacion principal siempre visible */
-div[data-testid="stTabs"] button[role="tab"]{font-weight:800;font-size:14px;padding:.65rem .85rem;}
-div[data-testid="stTabs"]{margin-top:.35rem;margin-bottom:.6rem;}
-@media (max-width:640px){div[data-testid="stTabs"] button[role="tab"]{font-size:12px;padding:.55rem .5rem;}}
+:root{
+    --vj:#111111;
+    --vj2:#2B2B2B;
+    --ink:#111111;
+    --muted:#6E6E6E;
+    --soft:#F4F4F4;
+    --soft2:#EAEAEA;
+    --border:#D8D8D8;
+    --card:#FFFFFF;
+}
+
+/* Fondo general */
+[data-testid="stAppViewContainer"]{
+    background:linear-gradient(180deg,#F7F7F7 0%,#EFEFEF 100%);
+    color:#111111;
+}
+
+.block-container{
+    max-width:760px;
+    padding-top:1rem;
+    padding-bottom:5rem;
+}
+
+/* Hero / marca */
+.vj-hero{
+    display:flex;
+    align-items:center;
+    gap:18px;
+    padding:18px 20px;
+    border-radius:22px;
+    background:linear-gradient(145deg,#FFFFFF 0%,#F2F2F2 100%);
+    color:#111111;
+    border:1px solid #D8D8D8;
+    box-shadow:0 10px 28px rgba(0,0,0,.10);
+    margin-bottom:10px;
+}
+.vj-logo{
+    width:92px;
+    height:92px;
+    object-fit:contain;
+    border-radius:16px;
+    background:#FFFFFF;
+    border:1px solid #E2E2E2;
+    padding:5px;
+}
+.vj-brand-copy{
+    min-width:0;
+}
+.vj-title{
+    font-size:30px;
+    font-weight:900;
+    line-height:1.05;
+    margin:0;
+    color:#111111;
+    letter-spacing:-0.02em;
+}
+.vj-sub{
+    color:#5E5E5E;
+    margin-top:7px;
+    font-size:14px;
+    line-height:1.4;
+}
+
+/* Tarjetas */
+.vj-card{
+    background:#FFFFFF;
+    border:1px solid #DCDCDC;
+    border-radius:18px;
+    padding:16px;
+    box-shadow:0 5px 16px rgba(0,0,0,.05);
+    margin:10px 0;
+}
+.vj-kpi{
+    font-size:28px;
+    font-weight:900;
+    color:#111111;
+}
+.vj-label{
+    color:#707070;
+    font-size:12px;
+    font-weight:700;
+    text-transform:uppercase;
+    letter-spacing:.04em;
+}
+.vj-good,.vj-warn,.vj-bad{color:#333333}
+
+/* Métricas */
+div[data-testid="stMetric"]{
+    background:#FFFFFF;
+    border:1px solid #D8D8D8;
+    padding:12px;
+    border-radius:16px;
+    box-shadow:0 3px 10px rgba(0,0,0,.035);
+}
+div[data-testid="stMetricValue"]{
+    color:#111111;
+}
+
+/* Botones */
+.stButton>button,
+.stLinkButton>a{
+    border-radius:12px !important;
+    font-weight:800 !important;
+    min-height:44px;
+    background:#111111 !important;
+    color:#FFFFFF !important;
+    border:1px solid #111111 !important;
+}
+.stButton>button:hover,
+.stLinkButton>a:hover{
+    background:#2E2E2E !important;
+    border-color:#2E2E2E !important;
+    color:#FFFFFF !important;
+}
+
+/* Inputs */
+.stTextInput input,
+.stNumberInput input,
+.stDateInput input,
+.stTextArea textarea{
+    border-radius:11px !important;
+    border-color:#CDCDCD !important;
+    background:#FFFFFF !important;
+}
+.stSelectbox div[data-baseweb="select"] > div{
+    border-color:#CDCDCD !important;
+    background:#FFFFFF !important;
+}
+
+/* Alertas en escala de grises */
+div[data-testid="stAlert"]{
+    border-radius:14px;
+    border:1px solid #D6D6D6;
+    background:#F5F5F5;
+    color:#222222;
+}
+div[data-testid="stAlert"] svg{
+    color:#333333 !important;
+}
+
+/* Barra de progreso */
+div[data-testid="stProgress"] > div > div > div{
+    background:#111111 !important;
+}
+
+/* Tabs / navegación */
+div[data-testid="stTabs"]{
+    margin-top:.35rem;
+    margin-bottom:.65rem;
+}
+div[data-testid="stTabs"] button[role="tab"]{
+    font-weight:800;
+    font-size:14px;
+    padding:.65rem .85rem;
+    color:#6A6A6A;
+}
+div[data-testid="stTabs"] button[role="tab"][aria-selected="true"]{
+    color:#111111 !important;
+}
+div[data-testid="stTabs"] [data-baseweb="tab-highlight"]{
+    background-color:#111111 !important;
+}
+
+/* Separadores */
+hr{
+    border-color:#D8D8D8 !important;
+}
+
+/* Tablas */
+[data-testid="stDataFrame"]{
+    border:1px solid #D8D8D8;
+    border-radius:12px;
+    overflow:hidden;
+}
+
+/* Links */
+a{
+    color:#222222;
+}
+
+/* Mobile */
+@media (max-width:640px){
+    .block-container{
+        padding-left:.75rem;
+        padding-right:.75rem;
+    }
+    .vj-hero{
+        gap:12px;
+        padding:14px;
+    }
+    .vj-logo{
+        width:72px;
+        height:72px;
+    }
+    .vj-title{
+        font-size:24px;
+    }
+    .vj-sub{
+        font-size:12.5px;
+    }
+    div[data-testid="stTabs"] button[role="tab"]{
+        font-size:12px;
+        padding:.55rem .45rem;
+    }
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -56,7 +253,32 @@ DONATION_WHATSAPP = "56985827304"
 
 
 def hero(sub="Control semanal de progreso, hábitos y nutrición"):
-    st.markdown(f"<div class='vj-hero'><div class='vj-title'>Virgils Journey</div><div class='vj-sub'>{sub}</div></div>", unsafe_allow_html=True)
+    logo_path = Path(__file__).resolve().parent / "assets" / "logovj.png"
+
+    if logo_path.exists():
+        logo_b64 = base64.b64encode(logo_path.read_bytes()).decode("utf-8")
+        logo_html = (
+            f"<img class='vj-logo' src='data:image/png;base64,{logo_b64}' "
+            "alt='Virgils Journey logo'>"
+        )
+    else:
+        logo_html = (
+            "<div class='vj-logo' style='display:flex;align-items:center;"
+            "justify-content:center;font-size:34px;font-weight:900;'>VJ</div>"
+        )
+
+    st.markdown(
+        f"""
+        <div class='vj-hero'>
+            {logo_html}
+            <div class='vj-brand-copy'>
+                <div class='vj-title'>Virgils Journey</div>
+                <div class='vj-sub'>{sub}</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def auth_screen():
@@ -117,6 +339,195 @@ def load_nutrition(sb, uid, day=None):
         q = q.eq("logged_on", str(day))
     r = q.order("created_at").execute()
     return pd.DataFrame(r.data or [])
+
+
+def load_activity(sb, uid, day=None):
+    q = sb.table("daily_activity").select("*").eq("user_id", uid)
+    if day:
+        q = q.eq("activity_date", str(day))
+    r = q.order("activity_date").execute()
+    return pd.DataFrame(r.data or [])
+
+
+def _latest_weight(measurements: pd.DataFrame) -> float | None:
+    if measurements is None or measurements.empty:
+        return None
+    row = measurements.sort_values("measured_on").iloc[-1]
+    return float(row["weight_kg"])
+
+
+def _weekly_behavior_summary(sb, uid, profile, measurements, days=7):
+    """
+    Resume nutrición + pasos + fuerza para los últimos N días.
+    No interpreta la ausencia de comida como 0 kcal: solo usa días con
+    al menos un registro nutricional.
+    """
+    all_nutrition = load_nutrition(sb, uid)
+    all_activity = load_activity(sb, uid)
+
+    end_day = date.today()
+    start_day = end_day - timedelta(days=days - 1)
+    current_weight = _latest_weight(measurements)
+
+    if current_weight is None or all_nutrition.empty:
+        return None
+
+    ndf = all_nutrition.copy()
+    ndf["logged_on"] = pd.to_datetime(ndf["logged_on"]).dt.date
+    ndf = ndf[(ndf["logged_on"] >= start_day) & (ndf["logged_on"] <= end_day)]
+    if ndf.empty:
+        return None
+
+    daily_food = (
+        ndf.groupby("logged_on", as_index=False)
+        .agg(
+            calories_kcal=("calories_kcal", "sum"),
+            protein_g=("protein_g", "sum"),
+            carbs_g=("carbs_g", "sum"),
+            fat_g=("fat_g", "sum"),
+        )
+    )
+
+    activity_by_day = {}
+    if not all_activity.empty:
+        adf = all_activity.copy()
+        adf["activity_date"] = pd.to_datetime(adf["activity_date"]).dt.date
+        adf = adf[(adf["activity_date"] >= start_day) & (adf["activity_date"] <= end_day)]
+        for _, row in adf.iterrows():
+            activity_by_day[row["activity_date"]] = row.to_dict()
+
+    rows = []
+    sex = profile.get("sex") or ""
+    for _, food in daily_food.iterrows():
+        d = food["logged_on"]
+        act = activity_by_day.get(d, {})
+        steps = int(act.get("steps") or 0)
+        strength_minutes = float(act.get("strength_minutes") or 0)
+        strength_intensity = act.get("strength_intensity") or "Moderado"
+
+        expenditure = daily_expenditure_with_activity(
+            weight_kg=current_weight,
+            height_cm=float(profile["height_cm"]),
+            age=int(profile["age"]),
+            sex=sex,
+            steps=steps,
+            strength_minutes=strength_minutes,
+            strength_intensity=strength_intensity,
+        )
+
+        # Si no se indicó sexo no podemos aplicar Mifflin-St Jeor por sexo.
+        # En ese caso usamos el TDEE clásico del perfil como aproximación.
+        if expenditure is None:
+            fallback = tdee_estimate(
+                current_weight,
+                float(profile["height_cm"]),
+                int(profile["age"]),
+                sex,
+                profile.get("activity_level") or "Sedentario",
+            )
+            total_exp = float(fallback) if fallback else None
+            steps_kcal = None
+            strength_kcal = None
+        else:
+            total_exp = expenditure["total_kcal"]
+            steps_kcal = expenditure["steps_kcal"]
+            strength_kcal = expenditure["strength_kcal"]
+
+        rows.append({
+            "day": d,
+            "calories_kcal": float(food["calories_kcal"]),
+            "protein_g": float(food["protein_g"]),
+            "steps": steps,
+            "strength_minutes": strength_minutes,
+            "strength_intensity": strength_intensity,
+            "expenditure_kcal": total_exp,
+            "steps_kcal": steps_kcal,
+            "strength_kcal": strength_kcal,
+            "activity_logged": d in activity_by_day,
+        })
+
+    rdf = pd.DataFrame(rows)
+    usable = rdf[rdf["expenditure_kcal"].notna()].copy()
+    if usable.empty:
+        return {
+            "days": rdf,
+            "valid_nutrition_days": len(rdf),
+            "valid_activity_days": int(rdf["activity_logged"].sum()),
+            "projection": None,
+        }
+
+    avg_intake = float(usable["calories_kcal"].mean())
+    avg_exp = float(usable["expenditure_kcal"].mean())
+    avg_steps = float(usable["steps"].mean())
+    strength_total = float(usable["strength_minutes"].sum())
+    avg_protein = float(usable["protein_g"].mean())
+
+    behavior_projection = behavior_projection_from_energy_balance(
+        current_weight_kg=current_weight,
+        goal_weight_kg=float(profile["goal_weight_kg"]),
+        avg_intake_kcal=avg_intake,
+        avg_expenditure_kcal=avg_exp,
+        as_of=end_day,
+        valid_days=len(usable),
+        min_valid_days=4,
+    )
+
+    return {
+        "days": rdf,
+        "valid_nutrition_days": len(rdf),
+        "valid_activity_days": int(rdf["activity_logged"].sum()),
+        "avg_intake_kcal": avg_intake,
+        "avg_expenditure_kcal": avg_exp,
+        "avg_deficit_kcal_day": avg_exp - avg_intake,
+        "avg_steps": avg_steps,
+        "strength_minutes_total": strength_total,
+        "avg_protein_g": avg_protein,
+        "projection": behavior_projection,
+    }
+
+
+def behavior_summary_card(sb, uid, profile, measurements):
+    summary = _weekly_behavior_summary(sb, uid, profile, measurements, days=7)
+
+    st.markdown("### Nutrición y actividad · últimos 7 días")
+
+    if not summary:
+        st.info(
+            "Registra comidas y actividad diaria para complementar la proyección "
+            "de peso con adherencia nutricional, pasos y entrenamiento de fuerza."
+        )
+        return
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Consumo promedio", f"{summary.get('avg_intake_kcal', 0):.0f} kcal")
+    c2.metric("Gasto estimado", f"{summary.get('avg_expenditure_kcal', 0):.0f} kcal")
+    c3.metric("Balance promedio", f"{summary.get('avg_deficit_kcal_day', 0):+.0f} kcal/día")
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Pasos promedio", f"{summary.get('avg_steps', 0):,.0f}".replace(",", "."))
+    c2.metric("Fuerza semanal", f"{summary.get('strength_minutes_total', 0):.0f} min")
+    c3.metric("Proteína promedio", f"{summary.get('avg_protein_g', 0):.0f} g/día")
+
+    st.caption(
+        f"Nutrición registrada: {summary.get('valid_nutrition_days', 0)}/7 días · "
+        f"Actividad registrada: {summary.get('valid_activity_days', 0)}/7 días."
+    )
+
+    bp = summary.get("projection")
+    if bp and bp.ready:
+        pace = bp.theoretical_pace_kg_week or 0
+        c1, c2 = st.columns(2)
+        c1.metric("Ritmo teórico por hábitos", f"-{pace:.2f} kg/sem" if pace > 0 else "Sin descenso estimable")
+        c2.metric(
+            "Fecha por hábitos",
+            bp.projected_date.strftime("%d-%m-%Y") if bp.projected_date else "Aún no estimable",
+        )
+        st.caption(
+            "Esta es una proyección secundaria de apoyo basada en balance energético estimado. "
+            "La fecha principal de Virgils Journey sigue basándose en la tendencia real de peso."
+        )
+    elif bp:
+        st.info(bp.message)
 
 
 def _prepare_progress_photo(uploaded_file) -> bytes:
@@ -307,10 +718,23 @@ def dashboard(sb, uid, profile, measurements):
 
     # chart
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=measurements["measured_on"], y=measurements["weight_kg"], mode="lines+markers", name="Peso"))
-    fig.add_hline(y=float(profile["goal_weight_kg"]), line_dash="dash", annotation_text="Meta")
-    fig.update_layout(height=320, margin=dict(l=5,r=5,t=25,b=5), legend_orientation="h", yaxis_title="kg", xaxis_title="")
+    fig.add_trace(go.Scatter(x=measurements["measured_on"], y=measurements["weight_kg"], mode="lines+markers", name="Peso", line=dict(color="#111111", width=3), marker=dict(color="#111111", size=8)))
+    fig.add_hline(y=float(profile["goal_weight_kg"]), line_dash="dash", line_color="#777777", annotation_text="Meta")
+    fig.update_layout(
+        height=320,
+        margin=dict(l=5,r=5,t=25,b=5),
+        legend_orientation="h",
+        yaxis_title="kg",
+        xaxis_title="",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="#FAFAFA",
+        font=dict(color="#222222"),
+        xaxis=dict(gridcolor="#E5E5E5", linecolor="#CFCFCF"),
+        yaxis=dict(gridcolor="#E5E5E5", linecolor="#CFCFCF"),
+    )
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+    behavior_summary_card(sb, uid, profile, measurements)
 
     st.markdown("### Medidas corporales")
     c1,c2,c3,c4 = st.columns(4)
@@ -368,17 +792,131 @@ def measurement_form(sb, uid, measurements):
 
 
 def nutrition_page(sb, uid, profile, measurements):
-    st.markdown("## Nutrición")
-    st.caption("Registra lo que comiste. El análisis con IA es una estimación, no una medición de laboratorio.")
-    today = date.today()
-    logs = load_nutrition(sb, uid, today)
-    last_weight = float(measurements.sort_values("measured_on").iloc[-1]["weight_kg"]) if not measurements.empty else None
-    if last_weight:
-        tdee = tdee_estimate(last_weight, float(profile["height_cm"]), int(profile["age"]), profile.get("sex") or "", profile.get("activity_level") or "Sedentario")
-        if tdee:
-            st.info(f"Gasto energético diario estimado (Mifflin–St Jeor + actividad): **{tdee:.0f} kcal/día**. Úsalo solo como referencia aproximada.")
+    st.markdown("## Nutrición y actividad")
+    st.caption(
+        "Registra lo que comiste y tu actividad del día. La IA, el gasto energético "
+        "y las proyecciones son estimaciones orientativas."
+    )
 
-    text = st.text_area("¿Qué comiste?", placeholder="Ej.: 200 g de pechuga de pollo, 1 taza de arroz, ensalada y un yogur")
+    today = date.today()
+    last_weight = _latest_weight(measurements)
+
+    # --------------------------
+    # Actividad del día
+    # --------------------------
+    st.markdown("### Actividad de hoy")
+    today_activity = load_activity(sb, uid, today)
+
+    current_steps = 0
+    current_strength = 0
+    current_intensity = "Moderado"
+    current_notes = ""
+
+    if not today_activity.empty:
+        arow = today_activity.iloc[-1]
+        current_steps = int(arow.get("steps") or 0)
+        current_strength = int(arow.get("strength_minutes") or 0)
+        current_intensity = arow.get("strength_intensity") or "Moderado"
+        current_notes = arow.get("notes") or ""
+
+    intensity_options = ["Suave", "Moderado", "Intenso"]
+    if current_intensity not in intensity_options:
+        current_intensity = "Moderado"
+
+    with st.form("daily_activity_form"):
+        c1, c2 = st.columns(2)
+        with c1:
+            steps = st.number_input(
+                "Pasos del día",
+                min_value=0,
+                max_value=100000,
+                value=current_steps,
+                step=500,
+            )
+        with c2:
+            strength_minutes = st.number_input(
+                "Entrenamiento de fuerza (min)",
+                min_value=0,
+                max_value=600,
+                value=current_strength,
+                step=5,
+            )
+
+        strength_intensity = st.selectbox(
+            "Intensidad de fuerza",
+            intensity_options,
+            index=intensity_options.index(current_intensity),
+            help="Suave, moderado o intenso. Se usa para estimar gasto, no para calificar el entrenamiento.",
+        )
+        activity_notes = st.text_input(
+            "Notas de actividad (opcional)",
+            value=current_notes,
+            placeholder="Ej.: piernas, torso, caminata larga, etc.",
+        )
+        save_activity = st.form_submit_button("Guardar actividad de hoy", use_container_width=True)
+
+    if save_activity:
+        sb.table("daily_activity").upsert(
+            {
+                "user_id": uid,
+                "activity_date": str(today),
+                "steps": int(steps),
+                "strength_minutes": int(strength_minutes),
+                "strength_intensity": strength_intensity,
+                "notes": activity_notes,
+            },
+            on_conflict="user_id,activity_date",
+        ).execute()
+        st.success("Actividad del día guardada.")
+        st.rerun()
+
+    # Gasto del día con pasos + fuerza explícitos
+    if last_weight:
+        activity_estimate = daily_expenditure_with_activity(
+            weight_kg=last_weight,
+            height_cm=float(profile["height_cm"]),
+            age=int(profile["age"]),
+            sex=profile.get("sex") or "",
+            steps=current_steps,
+            strength_minutes=current_strength,
+            strength_intensity=current_intensity,
+        )
+
+        if activity_estimate:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Gasto base", f"{activity_estimate['baseline_kcal']:.0f} kcal")
+            c2.metric(
+                "Actividad extra",
+                f"{activity_estimate['steps_kcal'] + activity_estimate['strength_kcal']:.0f} kcal",
+            )
+            c3.metric("Gasto total estimado", f"{activity_estimate['total_kcal']:.0f} kcal")
+            st.caption(
+                f"Pasos ≈ {activity_estimate['steps_kcal']:.0f} kcal extra · "
+                f"Fuerza ≈ {activity_estimate['strength_kcal']:.0f} kcal extra. "
+                "Se usa una base sedentaria para reducir doble conteo."
+            )
+        else:
+            fallback_tdee = tdee_estimate(
+                last_weight,
+                float(profile["height_cm"]),
+                int(profile["age"]),
+                profile.get("sex") or "",
+                profile.get("activity_level") or "Sedentario",
+            )
+            if fallback_tdee:
+                st.info(
+                    f"Gasto diario estimado por perfil: **{fallback_tdee:.0f} kcal/día**. "
+                    "Para usar pasos y fuerza en el cálculo más detallado, indica sexo en el perfil."
+                )
+
+    # --------------------------
+    # Registro de comida
+    # --------------------------
+    st.markdown("### Registrar comida")
+    text = st.text_area(
+        "¿Qué comiste?",
+        placeholder="Ej.: 200 g de pechuga de pollo, 1 taza de arroz, ensalada y un yogur",
+    )
 
     gemini_key = st.secrets.get("GEMINI_API_KEY", "")
     openrouter_key = st.secrets.get("OPENROUTER_API_KEY", "")
@@ -406,12 +944,12 @@ def nutrition_page(sb, uid, profile, measurements):
 
     with c2:
         if ai_enabled:
-            proveedores = []
+            providers = []
             if gemini_key:
-                proveedores.append("Gemini")
+                providers.append("Gemini")
             if openrouter_key:
-                proveedores.append("OpenRouter")
-            st.caption("IA disponible · " + " + ".join(proveedores))
+                providers.append("OpenRouter")
+            st.caption("IA disponible · " + " + ".join(providers))
         else:
             st.caption("Configura GEMINI_API_KEY u OPENROUTER_API_KEY para usar IA")
 
@@ -424,24 +962,56 @@ def nutrition_page(sb, uid, profile, measurements):
         if est.get("summary"):
             st.caption(est["summary"])
         if est.get("provider"):
-            st.caption(f"Proveedor IA: {est['provider']} · Confianza estimada: {est.get('confidence','media')}")
-        ok = st.form_submit_button("Agregar al día", use_container_width=True)
-    if ok:
-        sb.table("nutrition_logs").insert({"user_id":uid,"logged_on":str(today),"description":text or "Registro manual",
-            "calories_kcal":int(calories),"protein_g":float(protein),"carbs_g":float(carbs),"fat_g":float(fat),"ai_estimated":bool(est)}).execute()
-        st.session_state.pop("ai_food",None)
+            st.caption(
+                f"Proveedor IA: {est['provider']} · "
+                f"Confianza estimada: {est.get('confidence','media')}"
+            )
+        save_food = st.form_submit_button("Agregar al día", use_container_width=True)
+
+    if save_food:
+        sb.table("nutrition_logs").insert(
+            {
+                "user_id": uid,
+                "logged_on": str(today),
+                "description": text or "Registro manual",
+                "calories_kcal": int(calories),
+                "protein_g": float(protein),
+                "carbs_g": float(carbs),
+                "fat_g": float(fat),
+                "ai_estimated": bool(est),
+            }
+        ).execute()
+        st.session_state.pop("ai_food", None)
         st.rerun()
 
     logs = load_nutrition(sb, uid, today)
     if not logs.empty:
-        st.markdown("### Hoy")
-        c1,c2 = st.columns(2)
-        c1.metric("Calorías", f"{logs['calories_kcal'].fillna(0).sum():.0f} kcal")
-        c2.metric("Proteína", f"{logs['protein_g'].fillna(0).sum():.0f} g")
-        st.dataframe(logs[["description","calories_kcal","protein_g","carbs_g","fat_g"]], use_container_width=True, hide_index=True)
+        st.markdown("### Resumen de hoy")
+        c1,c2,c3 = st.columns(3)
+        total_kcal = float(logs["calories_kcal"].fillna(0).sum())
+        total_protein = float(logs["protein_g"].fillna(0).sum())
+        c1.metric("Calorías", f"{total_kcal:.0f} kcal")
+        c2.metric("Proteína", f"{total_protein:.0f} g")
+
+        today_activity = load_activity(sb, uid, today)
+        steps_today = int(today_activity.iloc[-1]["steps"]) if not today_activity.empty else 0
+        c3.metric("Pasos", f"{steps_today:,}".replace(",", "."))
+
+        st.dataframe(
+            logs[["description","calories_kcal","protein_g","carbs_g","fat_g"]],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    behavior_summary_card(sb, uid, profile, measurements)
+
+    st.caption(
+        "La proyección por hábitos usa los días con nutrición registrada y estima el gasto "
+        "a partir de Mifflin–St Jeor, una base sedentaria y la actividad explícita. "
+        "No sustituye la tendencia real de peso."
+    )
 
     support_card()
-
 
 def settings_page(sb, uid, profile):
     st.markdown("## Ajustes")
@@ -457,6 +1027,7 @@ def settings_page(sb, uid, profile):
     st.markdown("### Metodología")
     st.write("La proyección se activa con al menos 4 mediciones distribuidas en ~4 semanas. Usa una tendencia robusta de peso (mediana de pendientes entre pares de puntos), y se actualiza con hasta las últimas 8 mediciones.")
     st.write("El rango de 1–2 lb/semana se muestra solo como referencia de pérdida gradual citada por CDC. La fecha objetivo es una estimación y puede cambiar por líquidos, adherencia, enfermedad, medicamentos, sueño y otros factores.")
+    st.write("La proyección por hábitos es secundaria: utiliza calorías registradas, pasos y minutos de fuerza para estimar el balance energético. El peso observado sigue siendo la referencia principal porque el gasto y la ingesta tienen error de estimación.")
 
     st.markdown("### Privacidad")
     st.caption("Las mediciones y fotos se asocian a tu usuario. Las fotos se guardan en un bucket privado de Supabase y se muestran con enlaces temporales. Evita subir imágenes que no quieras conservar en el servicio.")
