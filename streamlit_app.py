@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import html
 import base64
 from pathlib import Path
 
@@ -492,6 +493,15 @@ def get_profile(sb, uid):
     return r.data[0] if r.data else None
 
 
+def preferred_name(profile: dict | None, fallback: str = "") -> str:
+    """Nombre que Virgils Journey usa para hablarle al usuario."""
+    profile = profile or {}
+    display_name = str(profile.get("display_name") or "").strip()
+    full_name = str(profile.get("full_name") or "").strip()
+    fallback = str(fallback or "").strip()
+    return display_name or full_name or fallback or "viajero"
+
+
 def load_measurements(sb, uid):
     r = sb.table("measurements").select("*").eq("user_id", uid).order("measured_on").execute()
     return pd.DataFrame(r.data or [])
@@ -790,7 +800,7 @@ def support_card():
     st.caption("WhatsApp: +56 9 8582 7304 · Los aportes son completamente voluntarios y no habilitan funciones adicionales.")
 
 
-def quick_guide(new_user: bool = False, key_prefix: str = "guide") -> bool:
+def quick_guide(new_user: bool = False, key_prefix: str = "guide", user_name: str = "") -> bool:
     """
     Guía rápida de Virgils Journey.
 
@@ -804,6 +814,7 @@ def quick_guide(new_user: bool = False, key_prefix: str = "guide") -> bool:
 
     step = int(st.session_state.get(state_key, 0))
     max_step = 4
+    safe_name = html.escape((user_name or "").strip())
 
     # Progreso visual. La primera pantalla también cuenta como parte de la guía.
     st.progress(min((step + 1) / (max_step + 1), 1.0))
@@ -811,9 +822,10 @@ def quick_guide(new_user: bool = False, key_prefix: str = "guide") -> bool:
 
     if step == 0:
         st.markdown(
-            """
+            f"""
             <div class='vj-guide-shell'>
-                <div class='vj-guide-kicker'>Antes de comenzar</div>
+                <div class='vj-guide-kicker'>Antes de comenzar{f", {safe_name}" if safe_name else ""}</div>
+                <div class='vj-guide-title'>{f"Este Journey es tuyo, {safe_name}." if safe_name else "Este Journey es tuyo."}</div>
                 <div class='vj-quote'>
                     La obsesión siempre vence al talento.<br><br>
                     Obsesiónate con ser tu mejor versión. No busques aprobación externa,
@@ -896,10 +908,10 @@ def quick_guide(new_user: bool = False, key_prefix: str = "guide") -> bool:
 
     else:
         st.markdown(
-            """
+            f"""
             <div class='vj-guide-shell'>
                 <div class='vj-guide-kicker'>4 · Empieza</div>
-                <div class='vj-guide-title'>No necesitas sentirte preparado. Necesitas comenzar.</div>
+                <div class='vj-guide-title'>{f'{safe_name}, no necesitas sentirte preparado. Necesitas comenzar.' if safe_name else 'No necesitas sentirte preparado. Necesitas comenzar.'}</div>
                 <div class='vj-guide-copy'>
                     Registra, cumple, revisa y repite. Tu Journey no se construye con un gran día,
                     sino con muchos días suficientemente buenos.
@@ -943,13 +955,55 @@ def quick_guide(new_user: bool = False, key_prefix: str = "guide") -> bool:
 def onboarding(sb, uid, email):
     hero("Tu Journey comienza aquí")
 
+    # Antes de la guía pedimos cómo quiere ser llamado. Se conserva en
+    # session_state hasta crear el perfil definitivo en Supabase.
+    if not st.session_state.get("vj_identity_ready", False):
+        st.markdown("## Antes de comenzar")
+        st.caption("Quiero hablarte por tu nombre. Si prefieres, puedes usar un seudónimo dentro de Virgils Journey.")
+
+        google_name = ""
+        try:
+            google_name = str(getattr(st.user, "name", "") or "").strip()
+        except Exception:
+            google_name = ""
+
+        email_guess = str(email or "").split("@", 1)[0].replace(".", " ").replace("_", " ").strip().title()
+        default_name = st.session_state.get("vj_full_name") or google_name or email_guess
+
+        with st.form("vj_identity_form"):
+            full_name = st.text_input("Tu nombre", value=default_name, max_chars=80, placeholder="Ej.: Virgilio Soto")
+            display_name = st.text_input(
+                "Seudónimo o nombre preferido (opcional)",
+                value=st.session_state.get("vj_display_name", ""),
+                max_chars=40,
+                placeholder="Ej.: Virgil",
+                help="Si escribes uno, será el nombre que Virgils Journey usará para hablarte.",
+            )
+            identity_ok = st.form_submit_button("Continuar a la guía", use_container_width=True)
+
+        if identity_ok:
+            clean_full_name = full_name.strip()
+            clean_display_name = display_name.strip()
+            if not clean_full_name:
+                st.warning("Escribe tu nombre para continuar.")
+                return
+            st.session_state["vj_full_name"] = clean_full_name
+            st.session_state["vj_display_name"] = clean_display_name
+            st.session_state["vj_identity_ready"] = True
+            st.rerun()
+        return
+
+    full_name = str(st.session_state.get("vj_full_name") or "").strip()
+    display_name = str(st.session_state.get("vj_display_name") or "").strip()
+    user_name = display_name or full_name
+
     # Un usuario sin perfil es un usuario nuevo. La guía se muestra antes de
     # crear su perfil y, una vez completada, pasa a la configuración inicial.
-    guide_done = quick_guide(new_user=True, key_prefix="vj_new_user_guide")
+    guide_done = quick_guide(new_user=True, key_prefix="vj_new_user_guide", user_name=user_name)
     if not guide_done:
         return
 
-    st.markdown("## Configura tu punto de partida")
+    st.markdown(f"## Configura tu punto de partida, {html.escape(user_name)}")
     st.info("Tu primera medición define el día habitual del recordatorio semanal. Puedes cambiarlo después.")
     with st.form("onboarding"):
         c1, c2 = st.columns(2)
@@ -974,7 +1028,10 @@ def onboarding(sb, uid, email):
             st.warning("Confirma la nota de uso para continuar.")
             return
         sb.table("profiles").insert({
-            "user_id": uid, "email": email, "age": int(age), "height_cm": float(height),
+            "user_id": uid, "email": email,
+            "full_name": full_name,
+            "display_name": display_name or None,
+            "age": int(age), "height_cm": float(height),
             "goal_weight_kg": float(goal), "reminder_weekday": WEEKDAYS.index(reminder),
             "sex": None if sex == "No indicar" else sex, "activity_level": activity,
             "timezone": "America/Santiago"
@@ -990,7 +1047,7 @@ def onboarding(sb, uid, email):
                 sb.table("measurements").update({"photo_path": photo_path}).eq("user_id", uid).eq("measured_on", str(date.today())).execute()
             except Exception as exc:
                 st.warning(f"La medición se guardó, pero la foto no pudo subirse: {exc}")
-        st.success("Journey iniciado.")
+        st.success(f"Journey iniciado. Bienvenido, {user_name}.")
         st.rerun()
 
 
@@ -1002,6 +1059,12 @@ def weekly_due(df: pd.DataFrame) -> bool:
 
 
 def dashboard(sb, uid, profile, measurements):
+    profile_email = str((profile or {}).get("email") or "")
+    email_fallback = profile_email.split("@", 1)[0].replace(".", " ").replace("_", " ").strip().title()
+    user_name = preferred_name(profile, email_fallback)
+    st.markdown(f"## Hola, {html.escape(user_name)} 👋")
+    st.caption("Este es tu Journey de hoy.")
+
     if measurements.empty:
         st.warning("No hay mediciones. Registra una para comenzar.")
         support_card()
@@ -1345,19 +1408,40 @@ def settings_page(sb, uid, profile):
         st.session_state["vj_replay_guide_step"] = 0
         st.rerun()
 
+    current_preferred_name = preferred_name(profile)
+
     if st.session_state.get("vj_show_quick_guide", False):
-        quick_guide(new_user=False, key_prefix="vj_replay_guide")
+        quick_guide(new_user=False, key_prefix="vj_replay_guide", user_name=current_preferred_name)
         st.divider()
 
     with st.form("settings"):
+        st.markdown("### Tu identidad en Virgils Journey")
+        full_name = st.text_input("Tu nombre", value=str(profile.get("full_name") or ""), max_chars=80)
+        display_name = st.text_input(
+            "Seudónimo o nombre preferido (opcional)",
+            value=str(profile.get("display_name") or ""),
+            max_chars=40,
+            help="Si lo dejas vacío, Virgils Journey usará tu nombre.",
+        )
         goal = st.number_input("Meta de peso (kg)", 35.0, 300.0, float(profile["goal_weight_kg"]), 0.1)
         reminder = st.selectbox("Día de recordatorio", WEEKDAYS, index=int(profile.get("reminder_weekday") or 0))
         activity = st.selectbox("Actividad", ["Sedentario","Ligero","Moderado","Alto","Muy alto"], index=["Sedentario","Ligero","Moderado","Alto","Muy alto"].index(profile.get("activity_level") or "Sedentario"))
         ok = st.form_submit_button("Guardar")
     if ok:
-        sb.table("profiles").update({"goal_weight_kg":float(goal),"reminder_weekday":WEEKDAYS.index(reminder),"activity_level":activity}).eq("user_id",uid).execute()
-        st.success("Ajustes guardados.")
-        st.rerun()
+        clean_full_name = full_name.strip()
+        clean_display_name = display_name.strip()
+        if not clean_full_name:
+            st.warning("El nombre no puede quedar vacío.")
+        else:
+            sb.table("profiles").update({
+                "full_name": clean_full_name,
+                "display_name": clean_display_name or None,
+                "goal_weight_kg": float(goal),
+                "reminder_weekday": WEEKDAYS.index(reminder),
+                "activity_level": activity,
+            }).eq("user_id",uid).execute()
+            st.success(f"Ajustes guardados. Te llamaré {clean_display_name or clean_full_name}.")
+            st.rerun()
     st.markdown("### Metodología")
     st.write("La proyección se activa con al menos 4 mediciones distribuidas en ~4 semanas. Usa una tendencia robusta de peso (mediana de pendientes entre pares de puntos), y se actualiza con hasta las últimas 8 mediciones.")
     st.write("El rango de 1–2 lb/semana se muestra solo como referencia de pérdida gradual citada por CDC. La fecha objetivo es una estimación y puede cambiar por líquidos, adherencia, enfermedad, medicamentos, sueño y otros factores.")
@@ -1408,7 +1492,8 @@ if not profile:
 measurements = load_measurements(sb, uid)
 
 # Encabezado global + navegación visible en formato móvil
-hero()
+user_name = preferred_name(profile, str(email or "").split("@", 1)[0])
+hero(f"Hola, {html.escape(user_name)} · tu viaje, medido con datos y consistencia")
 
 tab_inicio, tab_medicion, tab_nutricion, tab_ajustes = st.tabs([
     "🏠 Inicio",
