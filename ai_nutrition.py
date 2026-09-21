@@ -18,37 +18,13 @@ OPENROUTER_ATTEMPTS = 3
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
-def _food_context_hint(food_text: str) -> str:
-    """Genera pistas contextuales simples para reducir errores de interpretación."""
-    txt = (food_text or "").strip().lower()
-    hints: list[str] = []
-
-    # En Chile/LatAm es frecuente decir "20/25 rolls" para referirse a piezas de sushi.
-    # Solo asumimos rollos completos si el usuario lo expresa explícitamente.
-    sushi_count = re.search(r"\b(\d{1,3})\s*(?:rolls?|roles?)\b", txt)
-    if sushi_count and any(word in txt for word in ("sushi", "salm", "kanikama", "camar", "palmit")):
-        n = sushi_count.group(1)
-        if not re.search(r"\b(?:rollos?|rolls?)\s+complet", txt):
-            hints.append(
-                f'La frase "{n} rolls" aparece en contexto de sushi. '
-                f'Interprétala por defecto como {n} piezas/unidades de sushi, NO como {n} rollos completos, '
-                'salvo evidencia explícita en el texto.'
-            )
-
-    return "\n".join(f"- {h}" for h in hints)
-
-
 def _nutrition_prompt(food_text: str) -> str:
-    context_hint = _food_context_hint(food_text)
     return f"""
-Eres un asistente de estimación nutricional para Virgils Journey.
-Analiza SOLO la comida descrita por el usuario y estima una ingesta REALISTA.
+Eres un asistente de estimación nutricional para una aplicación de seguimiento
+personal. Analiza SOLO la comida descrita por el usuario.
 
 COMIDA:
 {food_text.strip()}
-
-PISTAS CONTEXTUALES AUTOMÁTICAS:
-{context_hint or '- Sin pistas adicionales.'}
 
 OBJETIVO:
 Estimar el total aproximado de:
@@ -57,18 +33,15 @@ Estimar el total aproximado de:
 - carbohidratos (g)
 - grasas (g)
 
-REGLAS DE INTERPRETACIÓN:
-1. Interpreta lenguaje cotidiano de Chile/Latinoamérica, no solo traducciones literales.
-2. Distingue cuidadosamente entre PIEZAS, PORCIONES, ROLLOS COMPLETOS, PLATOS, TAZAS, CUCHARADAS, etc.
-3. En sushi, expresiones como "20 rolls", "25 rolls" o "30 rolls" suelen usarse coloquialmente para referirse a piezas/unidades. NO multipliques como si fueran 20/25/30 rollos completos, salvo que el usuario diga explícitamente "rollos completos", "rollos enteros" o equivalente.
-4. Si una cantidad es ambigua pero existe una interpretación cotidiana claramente más probable, usa esa interpretación y explícala en `interpretation` y `summary`.
-5. Si hay dos interpretaciones igualmente plausibles y cambian mucho el resultado, usa la más conservadora y marca `confidence` como "baja".
-6. No inventes queso crema, fritura, tempura, mayonesa, salsas, bebidas, aceites ni acompañamientos si no fueron mencionados. Si son imprescindibles para una preparación típica, usa una cantidad moderada y dilo.
-7. Si faltan tamaños/pesos, utiliza porciones estándar razonables; evita extremos.
-8. Haz una comprobación de plausibilidad antes de responder. Una sola comida corriente no debería terminar en miles de kcal o cientos de gramos de proteína sin que el texto lo justifique claramente.
-9. Comprueba coherencia energética aproximada: proteína*4 + carbohidratos*4 + grasas*9 debe ser razonablemente compatible con las kcal totales.
-10. No des diagnóstico médico.
-11. Devuelve SOLO un objeto JSON válido, sin markdown ni texto adicional.
+REGLAS:
+1. Interpreta unidades habituales en español y alimentos comunes en Chile/Latinoamérica.
+2. Si una porción es ambigua, usa una porción estándar razonable y dilo en summary.
+3. Considera preparación, aceites, salsas y acompañamientos solo cuando estén mencionados
+   o sean claramente necesarios para la preparación descrita.
+4. No inventes ingredientes específicos que el usuario no mencionó.
+5. Si faltan cantidades, entrega una estimación prudente e indica que la confianza es baja.
+6. No des diagnóstico médico.
+7. Devuelve SOLO un objeto JSON válido, sin markdown, comentarios ni texto adicional.
 
 FORMATO JSON EXACTO:
 {{
@@ -77,46 +50,10 @@ FORMATO JSON EXACTO:
   "carbs_g": 0.0,
   "fat_g": 0.0,
   "confidence": "alta|media|baja",
-  "interpretation": "Qué cantidad/unidad entendiste y principales supuestos.",
-  "summary": "Breve explicación de la estimación y supuestos."
+  "summary": "Breve explicación de supuestos y porciones usadas."
 }}
 """.strip()
 
-
-def _correction_prompt(food_text: str, initial: dict[str, Any]) -> str:
-    """Segundo pase cuando el primer resultado no parece plausible."""
-    return f"""
-Revisa y CORRIGE una estimación nutricional que fue marcada como potencialmente no plausible.
-
-COMIDA ORIGINAL:
-{food_text.strip()}
-
-ESTIMACIÓN ANTERIOR:
-{json.dumps(initial, ensure_ascii=False)}
-
-PISTAS:
-{_food_context_hint(food_text) or '- Sin pistas adicionales.'}
-
-INSTRUCCIONES:
-1. Reinterpreta desde cero las cantidades y unidades del usuario.
-2. Si aparece una cantidad seguida de "roll/rolls" en contexto de sushi y NO dice explícitamente rollos completos/enteros, interprétala como número de piezas de sushi.
-3. Evita multiplicaciones implícitas que transformen piezas en rollos completos.
-4. Usa porciones habituales en Chile/Latinoamérica y valores nutricionales razonables.
-5. Verifica que proteína*4 + carbohidratos*4 + grasas*9 sea compatible con las calorías.
-6. Si la comida realmente pudiera ser extraordinariamente grande, solo conserva un valor extremo si el texto lo justifica de forma inequívoca.
-7. Devuelve SOLO JSON válido.
-
-FORMATO JSON EXACTO:
-{{
-  "calories_kcal": 0,
-  "protein_g": 0.0,
-  "carbs_g": 0.0,
-  "fat_g": 0.0,
-  "confidence": "alta|media|baja",
-  "interpretation": "Qué cantidad/unidad entendiste y principales supuestos.",
-  "summary": "Breve explicación de la estimación corregida."
-}}
-""".strip()
 
 def _extract_json(text: str) -> dict[str, Any]:
     if not text:
@@ -161,26 +98,20 @@ def _normalize_result(data: dict[str, Any], provider: str) -> dict[str, Any]:
     carbs = max(0.0, _to_float(data.get("carbs_g")))
     fat = max(0.0, _to_float(data.get("fat_g")))
 
-    interpretation = str(data.get("interpretation") or "").strip()
     summary = str(data.get("summary") or "").strip()
     confidence = str(data.get("confidence") or "media").strip().lower()
     if confidence not in {"alta", "media", "baja"}:
         confidence = "media"
 
     macro_kcal = protein * 4 + carbs * 4 + fat * 9
-    macro_diff_pct = None
     if calories > 0 and macro_kcal > 0:
-        macro_diff_pct = abs(calories - macro_kcal) / max(calories, 1)
-        if macro_diff_pct > 0.25:
-            confidence = "baja"
-            note = (
-                "La relación entre calorías y macronutrientes tiene una diferencia relevante; "
-                "la estimación fue marcada para revisión."
+        diff = abs(calories - macro_kcal) / max(calories, 1)
+        if diff > 0.35:
+            warning = (
+                "Nota: calorías y macronutrientes presentan una diferencia relevante; "
+                "revisa porciones, preparación y aceites."
             )
-            summary = f"{summary} {note}".strip()
-
-    if interpretation:
-        summary = f"Interpretación: {interpretation}. {summary}".strip()
+            summary = f"{summary} {warning}".strip()
 
     return {
         "calories_kcal": calories,
@@ -188,54 +119,10 @@ def _normalize_result(data: dict[str, Any], provider: str) -> dict[str, Any]:
         "carbs_g": round(carbs, 1),
         "fat_g": round(fat, 1),
         "summary": summary,
-        "interpretation": interpretation,
         "confidence": confidence,
         "provider": provider,
-        "macro_kcal": round(macro_kcal, 1),
-        "macro_diff_pct": round(macro_diff_pct, 3) if macro_diff_pct is not None else None,
     }
 
-
-def _looks_implausible(food_text: str, result: dict[str, Any]) -> tuple[bool, list[str]]:
-    """Detecta salidas extremas o internamente incoherentes antes de mostrarlas."""
-    calories = float(result.get("calories_kcal") or 0)
-    protein = float(result.get("protein_g") or 0)
-    carbs = float(result.get("carbs_g") or 0)
-    fat = float(result.get("fat_g") or 0)
-    macro_diff = result.get("macro_diff_pct")
-
-    reasons: list[str] = []
-    txt = (food_text or "").lower()
-
-    # Límites deliberadamente amplios: no pretenden decir cuánto "debe" comer el usuario,
-    # solo evitar errores obvios de escala/unidades del modelo.
-    if calories > 3500:
-        reasons.append("calorías extraordinariamente altas para una sola descripción")
-    if protein > 250:
-        reasons.append("proteína extraordinariamente alta")
-    if carbs > 500:
-        reasons.append("carbohidratos extraordinariamente altos")
-    if fat > 220:
-        reasons.append("grasas extraordinariamente altas")
-    if macro_diff is not None and float(macro_diff) > 0.35:
-        reasons.append("calorías y macros no son coherentes")
-
-    # Protección específica contra el error observado: N "rolls" de sushi tratados como N rollos enteros.
-    sushi_count = re.search(r"\b(\d{1,3})\s*(?:rolls?|roles?)\b", txt)
-    if sushi_count and any(word in txt for word in ("sushi", "salm", "kanikama", "camar", "palmit")):
-        n = int(sushi_count.group(1))
-        explicit_full_rolls = bool(re.search(r"\b(?:rollos?|rolls?)\s+(?:complet|enter)", txt))
-        if not explicit_full_rolls and n <= 60 and calories > max(3000, n * 140):
-            reasons.append("posible confusión entre piezas de sushi y rollos completos")
-
-    return bool(reasons), reasons
-
-
-def _validate_or_raise(food_text: str, result: dict[str, Any]) -> dict[str, Any]:
-    bad, reasons = _looks_implausible(food_text, result)
-    if bad:
-        raise ValueError("Estimación no plausible: " + "; ".join(reasons))
-    return result
 
 def _is_transient_error(exc: Exception) -> bool:
     message = str(exc).upper()
@@ -268,21 +155,12 @@ def _try_gemini(
 
     for attempt in range(GEMINI_ATTEMPTS):
         try:
-            response = client.models.generate_content(model=model, contents=prompt)
-            raw = _extract_json(getattr(response, "text", None) or "")
-            result = _normalize_result(raw, f"Gemini · {model}")
-
-            bad, reasons = _looks_implausible(food_text, result)
-            if bad:
-                correction = client.models.generate_content(
-                    model=model,
-                    contents=_correction_prompt(food_text, raw),
-                )
-                corrected_raw = _extract_json(getattr(correction, "text", None) or "")
-                corrected = _normalize_result(corrected_raw, f"Gemini · {model} · verificado")
-                return _validate_or_raise(food_text, corrected)
-
-            return result
+            response = client.models.generate_content(
+                model=model,
+                contents=prompt,
+            )
+            text = getattr(response, "text", None) or ""
+            return _normalize_result(_extract_json(text), f"Gemini · {model}")
         except Exception as exc:
             last_error = exc
             if attempt < GEMINI_ATTEMPTS - 1 and _is_transient_error(exc):
@@ -292,73 +170,77 @@ def _try_gemini(
 
     raise last_error or RuntimeError("Gemini no respondió.")
 
-def _openrouter_json(prompt: str, api_key: str, model: str) -> dict[str, Any]:
-    headers = {
-        "Authorization": f"Bearer {api_key.strip()}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://virgilsjourney.streamlit.app",
-        "X-Title": "Virgils Journey",
-    }
-    payload = {
-        "model": model,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "Eres un estimador nutricional cuidadoso. Responde únicamente con JSON válido, "
-                    "revisa unidades y evita errores de escala."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.15,
-    }
-
-    response = requests.post(
-        OPENROUTER_URL,
-        headers=headers,
-        json=payload,
-        timeout=45,
-    )
-    if response.status_code >= 400:
-        raise RuntimeError(f"OpenRouter HTTP {response.status_code}: {response.text[:1200]}")
-
-    data = response.json()
-    choices = data.get("choices") or []
-    if not choices:
-        raise RuntimeError("OpenRouter no devolvió una respuesta utilizable.")
-
-    content = choices[0].get("message", {}).get("content", "")
-    if isinstance(content, list):
-        content = "\n".join(
-            str(item.get("text", "")) if isinstance(item, dict) else str(item)
-            for item in content
-        )
-    return _extract_json(str(content))
-
 
 def _try_openrouter(
     food_text: str,
     api_key: str,
     model: str,
 ) -> dict[str, Any]:
+    prompt = _nutrition_prompt(food_text)
     last_error: Exception | None = None
+
+    headers = {
+        "Authorization": f"Bearer {api_key.strip()}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://virgilsjourney.streamlit.app",
+        "X-Title": "Virgils Journey",
+    }
+
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "Responde únicamente con JSON válido y sigue exactamente "
+                    "el formato solicitado por el usuario."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.2,
+    }
 
     for attempt in range(OPENROUTER_ATTEMPTS):
         try:
-            raw = _openrouter_json(_nutrition_prompt(food_text), api_key, model)
-            result = _normalize_result(raw, f"OpenRouter · {model}")
+            response = requests.post(
+                OPENROUTER_URL,
+                headers=headers,
+                json=payload,
+                timeout=45,
+            )
 
-            bad, reasons = _looks_implausible(food_text, result)
-            if bad:
-                corrected_raw = _openrouter_json(_correction_prompt(food_text, raw), api_key, model)
-                corrected = _normalize_result(
-                    corrected_raw,
-                    f"OpenRouter · {model} · verificado",
+            if response.status_code >= 400:
+                body = response.text[:1200]
+                raise RuntimeError(
+                    f"OpenRouter HTTP {response.status_code}: {body}"
                 )
-                return _validate_or_raise(food_text, corrected)
 
-            return result
+            data = response.json()
+            choices = data.get("choices") or []
+            if not choices:
+                raise RuntimeError("OpenRouter no devolvió una respuesta utilizable.")
+
+            content = (
+                choices[0]
+                .get("message", {})
+                .get("content", "")
+            )
+
+            # Algunos proveedores pueden responder content como lista estructurada.
+            if isinstance(content, list):
+                text_parts = []
+                for item in content:
+                    if isinstance(item, dict):
+                        text_parts.append(str(item.get("text", "")))
+                    else:
+                        text_parts.append(str(item))
+                content = "\n".join(text_parts)
+
+            return _normalize_result(
+                _extract_json(str(content)),
+                f"OpenRouter · {model}",
+            )
 
         except Exception as exc:
             last_error = exc
@@ -370,6 +252,7 @@ def _try_openrouter(
 
     raise last_error or RuntimeError("OpenRouter no respondió.")
 
+
 def estimate_nutrition(
     food_text: str,
     gemini_api_key: str = "",
@@ -378,11 +261,11 @@ def estimate_nutrition(
     openrouter_model: str = DEFAULT_OPENROUTER_MODEL,
 ) -> dict[str, Any]:
     """
-    Estimación nutricional con validación de plausibilidad y fallback automático.
+    Estimación nutricional con fallback automático.
 
     Orden:
-    1) Gemini. Si la salida parece absurda, hace un segundo pase de corrección.
-    2) OpenRouter si Gemini falla o la estimación corregida sigue siendo no plausible.
+    1) Gemini (máximo 2 intentos rápidos)
+    2) OpenRouter si Gemini falla o está saturado
 
     Al menos una de las dos API keys debe estar configurada.
     """
@@ -450,10 +333,10 @@ def _daily_guidance_prompt(context: dict[str, Any]) -> str:
     ) or "- Aún no hay comidas registradas."
 
     return f"""
-Eres el coach nutricional de Virgils Journey. Tu tarea es analizar el día ACTUAL
-con datos ya calculados por la aplicación y sugerir próximas comidas prácticas.
+Eres el coach nutricional de Virgils Journey. Analiza el día ACTUAL con los datos
+ya calculados por la aplicación y entrega recomendaciones concretas, sostenibles y accionables.
 No diagnostiques ni sustituyas consejo médico. No propongas ayunos extremos,
-castigos con ejercicio ni déficits mayores al objetivo entregado por la app.
+castigos con ejercicio ni compensaciones agresivas después de comer de más.
 
 DATOS DEL DÍA
 - Hora local actual: {context.get('current_local_time','')}
@@ -480,30 +363,41 @@ COMIDAS REGISTRADAS
 {meals_text}
 
 REGLAS
-1. La hora y el rango habitual de comidas son obligatorios para interpretar el día.
-2. Si el estado es "before", NO marques el registro como incompleto ni emitas warning por pocas calorías: la ventana de alimentación aún no comienza.
-3. Si el estado es "within", interpreta el balance como "hasta este momento". NO lo llames déficit final ni emitas warning solo porque el consumo aún es bajo. Recomienda cómo distribuir lo que queda dentro de las horas restantes.
-4. Si el estado es "after", recién entonces puedes evaluar si el consumo total parece demasiado bajo o si faltan comidas por registrar.
-5. Si hay ayuno intermitente, respeta el rango indicado y no sugieras comer fuera de él salvo que el usuario ya lo haya superado o exista una razón de seguridad clara. No promuevas ayunos más largos.
-6. Prioriza completar proteína, fibra, verduras/frutas y saciedad sin superar innecesariamente el presupuesto.
-7. Sugiere 2 o 3 opciones de próxima comida fáciles de conseguir/preparar en Chile/Latinoamérica, coherentes con la hora actual y el tiempo restante de la ventana.
-8. Cada opción debe incluir kcal aproximadas y proteína aproximada.
-9. Si quedan pocas calorías, no recomiendes saltarse comidas; propone una opción pequeña y nutritiva.
-10. Si ya se superó el presupuesto, propone una siguiente comida moderada y equilibrada, sin compensaciones extremas.
-11. Sé breve, concreto y accionable.
-12. Devuelve SOLO JSON válido, sin markdown.
+1. Interpreta siempre el día según la hora y el rango habitual de comidas.
+2. Si el estado es "before", NO marques pocas calorías como problema: la ventana aún no comienza.
+3. Si el estado es "within", habla del balance "hasta este momento". Indica QUÉ conviene comer después para acercarse al déficit objetivo sin quedar excesivamente bajo.
+4. Si el estado es "after", evalúa el cierre del día. Si el déficit real es mucho mayor al objetivo y el registro parece completo, recomienda aumentar energía y calidad nutricional al día siguiente; no presentes un déficit extremo como logro.
+5. Si el usuario superó el presupuesto calórico, NO recomiendes saltarse comidas, ayunar más ni "quemarlo" con ejercicio. Indica que mañana conviene volver al objetivo normal, moderar alimentos muy densos en calorías y priorizar proteína magra, verduras, fruta, legumbres/cereales integrales y agua.
+6. Si el usuario quedó muy por debajo del objetivo, recomienda completar con alimentos concretos y sostenibles, priorizando proteína, fibra y una fuente razonable de carbohidratos y grasas saludables.
+7. Si está cerca del objetivo, refuerza la conducta y sugiere una comida que complete micronutrientes/proteína sin desbalancear el día.
+8. Da 2 o 3 opciones concretas de próxima comida cuando todavía corresponda comer hoy. Cada una debe incluir kcal y proteína aproximadas.
+9. Genera SIEMPRE una receta de almuerzo para mañana basada en lo que comió hoy: debe aportar variedad y compensar nutricionalmente carencias probables, no "castigar" excesos. Debe ser fácil de conseguir/preparar en Chile/Latinoamérica.
+10. La receta de mañana debe incluir nombre, ingredientes con cantidades simples, preparación en 3 a 5 pasos, kcal y proteína aproximadas.
+11. El campo action_message debe ser directo: por ejemplo "Hoy aún te conviene comer...", "Hoy estás cerca del objetivo..." o "Hoy superaste el presupuesto; mañana vuelve a tu objetivo normal y prioriza...".
+12. No uses lenguaje culpabilizante. Habla de consistencia semanal y sostenibilidad.
+13. Sé concreto y accionable.
+14. Devuelve SOLO JSON válido, sin markdown.
 
 FORMATO JSON EXACTO
 {{
   "status": "bien|atencion|incompleto",
   "headline": "frase de máximo 12 palabras",
-  "analysis": "2 a 4 frases breves",
+  "analysis": "2 a 4 frases breves explicando cómo va el día",
+  "action_message": "recomendación principal concreta y accionable",
   "next_meals": [
     {{"name":"...", "kcal":0, "protein_g":0, "reason":"..."}},
     {{"name":"...", "kcal":0, "protein_g":0, "reason":"..."}}
   ],
+  "tomorrow_lunch": {{
+    "name": "nombre de la receta",
+    "why": "por qué complementa lo comido hoy",
+    "ingredients": ["ingrediente y cantidad", "ingrediente y cantidad"],
+    "steps": ["paso 1", "paso 2", "paso 3"],
+    "kcal": 0,
+    "protein_g": 0
+  }},
   "activity_note": "1 frase sobre pasos/fuerza y cómo encajan hoy",
-  "warning": "mensaje breve si el registro parece incompleto; de lo contrario cadena vacía"
+  "warning": "solo si faltan datos o existe una razón concreta para revisar el registro; de lo contrario cadena vacía"
 }}
 """.strip()
 
@@ -524,11 +418,27 @@ def _normalize_guidance(data: dict[str, Any], provider: str) -> dict[str, Any]:
             "reason": str(item.get("reason") or "").strip(),
         })
 
+    recipe_raw = data.get("tomorrow_lunch") or {}
+    if not isinstance(recipe_raw, dict):
+        recipe_raw = {}
+    ingredients = [str(x).strip() for x in (recipe_raw.get("ingredients") or []) if str(x).strip()][:10]
+    steps = [str(x).strip() for x in (recipe_raw.get("steps") or []) if str(x).strip()][:6]
+    tomorrow_lunch = {
+        "name": str(recipe_raw.get("name") or "Almuerzo equilibrado para mañana").strip(),
+        "why": str(recipe_raw.get("why") or "").strip(),
+        "ingredients": ingredients,
+        "steps": steps,
+        "kcal": max(0, _to_int(recipe_raw.get("kcal"))),
+        "protein_g": max(0.0, round(_to_float(recipe_raw.get("protein_g")), 1)),
+    }
+
     return {
         "status": status,
         "headline": str(data.get("headline") or "Balance del día").strip(),
         "analysis": str(data.get("analysis") or "").strip(),
+        "action_message": str(data.get("action_message") or "").strip(),
         "next_meals": meals_out,
+        "tomorrow_lunch": tomorrow_lunch,
         "activity_note": str(data.get("activity_note") or "").strip(),
         "warning": str(data.get("warning") or "").strip(),
         "provider": provider,

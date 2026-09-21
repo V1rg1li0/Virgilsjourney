@@ -874,15 +874,18 @@ def behavior_summary_card(sb, uid, profile, measurements):
             )
             if today_deficit > 1200:
                 st.warning(
-                    "El déficit de hoy, ya fuera de tu rango habitual de comidas, es muy alto. "
-                    "Revisa si faltan comidas, bebidas, aceites o porciones por registrar antes de tomarlo como definitivo."
+                    "El déficit de hoy está muy por encima de un rango sostenible. Si el registro está completo, "
+                    "no conviene intentar repetirlo: mañana vuelve a un déficit moderado y prioriza una comida completa "
+                    "con proteína, verduras, una fuente de carbohidratos y grasas saludables. Si faltó registrar algo, "
+                    "corrígelo para que la recomendación sea más precisa."
                 )
 
     # Un warning semanal solo se levanta usando días cerrados; nunca por una mañana incompleta.
     if balance_days > 0 and deficit > 1200:
         st.warning(
-            "El déficit promedio de los días ya cerrados es muy alto. Revisa que esos días estén completos "
-            "antes de interpretarlo como tu déficit habitual."
+            "El déficit promedio de los días cerrados es demasiado alto para usarlo como referencia habitual. "
+            "Primero confirma que registraste todas las comidas; si está correcto, apunta a un déficit más moderado "
+            "y mantenible en el tiempo en lugar de intentar sostener este nivel."
         )
 
     bp = summary.get("projection")
@@ -1497,24 +1500,22 @@ def _render_ai_daily_coach(context, result=None):
     if status == "before":
         st.info(
             f"Son las {now_txt}. Tu rango habitual de comidas es {start_txt}–{end_txt}{fasting_txt}. "
-            f"El balance acumulado hasta ahora es {apparent:+.0f} kcal, pero todavía no corresponde interpretarlo "
-            "como déficit diario porque tu ventana de alimentación aún no comienza."
+            f"El balance acumulado es {apparent:+.0f} kcal, pero aún no corresponde evaluarlo como déficit diario."
         )
     elif status == "within":
         st.info(
-            f"Son las {now_txt} y aún estás dentro de tu rango habitual de comidas {start_txt}–{end_txt}{fasting_txt}. "
-            f"Tu balance acumulado hasta este momento es {apparent:+.0f} kcal: es el valor real hasta ahora, "
-            "pero puede cambiar con las siguientes comidas del día."
+            f"Son las {now_txt} y aún estás dentro de tu rango de comidas {start_txt}–{end_txt}{fasting_txt}. "
+            f"Tu balance actual es {apparent:+.0f} kcal; la recomendación considera lo que todavía puedes comer hoy."
         )
     else:
         st.caption(
             f"Tu rango habitual de comidas {start_txt}–{end_txt}{fasting_txt} ya terminó. "
-            "Si registraste todo lo consumido, el balance de hoy ya puede considerarse cercano al cierre diario."
+            "Si registraste todo lo consumido, la IA tratará este valor como cierre aproximado del día."
         )
 
     st.caption(
         f"Déficit objetivo orientativo: ~{context['target_deficit_kcal']:.0f} kcal/día · "
-        "la IA considera la hora actual y tu rango habitual de comidas antes de marcar un registro como incompleto."
+        "el objetivo es que sea sostenible, no maximizar el déficit."
     )
 
     if not result:
@@ -1526,12 +1527,18 @@ def _render_ai_daily_coach(context, result=None):
         f"<div class='vj-coach-text'>{html.escape(result.get('analysis') or '')}</div></div>"
     )
     st.markdown(body, unsafe_allow_html=True)
+
+    action = (result.get("action_message") or "").strip()
+    if action:
+        st.success(f"🎯 {action}")
+
     if warning:
         st.warning(warning)
 
     options = result.get("next_meals") or []
     if options:
-        st.markdown("**Qué podrías comer después**")
+        title = "Qué te conviene comer después" if status != "after" else "Opciones equilibradas para tu próxima comida"
+        st.markdown(f"**{title}**")
         cols = st.columns(min(3, len(options)))
         for col, meal in zip(cols, options):
             with col:
@@ -1539,6 +1546,25 @@ def _render_ai_daily_coach(context, result=None):
                 st.caption(f"≈ {meal.get('kcal',0)} kcal · {meal.get('protein_g',0):.0f} g proteína")
                 if meal.get("reason"):
                     st.write(meal["reason"])
+
+    recipe = result.get("tomorrow_lunch") or {}
+    if recipe and recipe.get("name"):
+        st.markdown("### 🍽️ Almuerzo recomendado para mañana")
+        st.markdown(f"**{recipe.get('name')}**")
+        if recipe.get("why"):
+            st.write(recipe["why"])
+        c1, c2 = st.columns(2)
+        c1.metric("Calorías aprox.", f"{recipe.get('kcal',0):.0f} kcal")
+        c2.metric("Proteína aprox.", f"{recipe.get('protein_g',0):.0f} g")
+        ingredients = recipe.get("ingredients") or []
+        steps = recipe.get("steps") or []
+        if ingredients:
+            st.markdown("**Ingredientes**")
+            st.markdown("\n".join(f"- {x}" for x in ingredients))
+        if steps:
+            st.markdown("**Preparación**")
+            st.markdown("\n".join(f"{i+1}. {x}" for i, x in enumerate(steps)))
+
     if result.get("activity_note"):
         st.info(result["activity_note"])
     if result.get("provider"):
@@ -1861,7 +1887,7 @@ def nutrition_page(sb, uid, profile, measurements):
         if ai_enabled and coach_context:
             if auto_refresh:
                 analyze_now = True
-            elif st.button("🤖 Actualizar análisis y próxima comida", use_container_width=True):
+            elif st.button("🤖 Actualizar análisis, recomendación y menú de mañana", use_container_width=True):
                 analyze_now = True
 
         if analyze_now:
