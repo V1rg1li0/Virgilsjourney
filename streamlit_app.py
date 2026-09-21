@@ -22,7 +22,7 @@ from PIL import Image, ImageOps
 
 from analytics import build_projection, bmi, tdee_estimate
 from db import configured, client, sign_in, sign_up, sign_out
-from ai_nutrition import estimate_with_gemini
+from ai_nutrition import estimate_nutrition
 
 st.set_page_config(page_title="Virgils Journey", page_icon="🏃", layout="centered")
 
@@ -375,19 +375,41 @@ def nutrition_page(sb, uid, profile, measurements):
             st.info(f"Gasto energético diario estimado (Mifflin–St Jeor + actividad): **{tdee:.0f} kcal/día**. Úsalo solo como referencia aproximada.")
 
     text = st.text_area("¿Qué comiste?", placeholder="Ej.: 200 g de pechuga de pollo, 1 taza de arroz, ensalada y un yogur")
-    ai_enabled = bool(st.secrets.get("GEMINI_API_KEY", ""))
+
+    gemini_key = st.secrets.get("GEMINI_API_KEY", "")
+    openrouter_key = st.secrets.get("OPENROUTER_API_KEY", "")
+    ai_enabled = bool(gemini_key or openrouter_key)
+
     c1,c2 = st.columns(2)
     with c1:
         if st.button("Estimar con IA", use_container_width=True, disabled=not ai_enabled):
-            if not text.strip(): st.warning("Escribe una comida primero.")
+            if not text.strip():
+                st.warning("Escribe una comida primero.")
             else:
                 try:
-                    est = estimate_with_gemini(text, st.secrets["GEMINI_API_KEY"], st.secrets.get("GEMINI_MODEL","gemini-3.7-flash"))
+                    with st.spinner("Analizando comida..."):
+                        est = estimate_nutrition(
+                            food_text=text,
+                            gemini_api_key=gemini_key,
+                            gemini_model=st.secrets.get("GEMINI_MODEL", "gemini-3.6-flash"),
+                            openrouter_api_key=openrouter_key,
+                            openrouter_model=st.secrets.get("OPENROUTER_MODEL", "openrouter/free"),
+                        )
                     st.session_state.ai_food = est
+                    st.success("Estimación completada.")
                 except Exception as e:
                     st.error(f"No fue posible estimar: {e}")
+
     with c2:
-        st.caption("IA disponible" if ai_enabled else "Configura GEMINI_API_KEY para usar IA")
+        if ai_enabled:
+            proveedores = []
+            if gemini_key:
+                proveedores.append("Gemini")
+            if openrouter_key:
+                proveedores.append("OpenRouter")
+            st.caption("IA disponible · " + " + ".join(proveedores))
+        else:
+            st.caption("Configura GEMINI_API_KEY u OPENROUTER_API_KEY para usar IA")
 
     est = st.session_state.get("ai_food", {})
     with st.form("food"):
@@ -395,7 +417,10 @@ def nutrition_page(sb, uid, profile, measurements):
         protein = st.number_input("Proteína (g)", 0.0, 1000.0, float(est.get("protein_g",0) or 0), 1.0)
         carbs = st.number_input("Carbohidratos (g)", 0.0, 1500.0, float(est.get("carbs_g",0) or 0), 1.0)
         fat = st.number_input("Grasas (g)", 0.0, 1000.0, float(est.get("fat_g",0) or 0), 1.0)
-        if est.get("summary"): st.caption(est["summary"])
+        if est.get("summary"):
+            st.caption(est["summary"])
+        if est.get("provider"):
+            st.caption(f"Proveedor IA: {est['provider']} · Confianza estimada: {est.get('confidence','media')}")
         ok = st.form_submit_button("Agregar al día", use_container_width=True)
     if ok:
         sb.table("nutrition_logs").insert({"user_id":uid,"logged_on":str(today),"description":text or "Registro manual",
