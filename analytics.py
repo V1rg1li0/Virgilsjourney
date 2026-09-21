@@ -152,3 +152,195 @@ def tdee_estimate(weight_kg: float, height_cm: float, age: int, sex: str, activi
         "Muy alto": 1.90,
     }
     return ree * factors.get(activity, 1.20)
+
+
+# ============================================================
+# NUTRICIÓN + ACTIVIDAD DIARIA
+# ============================================================
+
+STRENGTH_METS = {
+    # 2024 Adult Compendium of Physical Activities:
+    # body-weight resistance general ~= 3.0 MET
+    # resistance training, multiple exercises ~= 3.5 MET
+    # circuit / vigorous resistance ~= 5.8 MET
+    "Suave": 3.0,
+    "Moderado": 3.5,
+    "Intenso": 5.8,
+}
+
+
+def kcal_from_met(
+    weight_kg: float,
+    minutes: float,
+    met: float,
+    subtract_resting_met: bool = True,
+) -> float:
+    """
+    Estima kcal a partir de MET:
+        kcal/min = MET * 3.5 * kg / 200
+
+    Como Virgils Journey ya parte de un gasto basal/sedentario, por defecto
+    resta 1 MET para reducir doble conteo de la energía de reposo.
+    """
+    if weight_kg <= 0 or minutes <= 0 or met <= 0:
+        return 0.0
+
+    effective_met = max(met - 1.0, 0.0) if subtract_resting_met else met
+    return effective_met * 3.5 * weight_kg / 200.0 * minutes
+
+
+def steps_expenditure_kcal(
+    weight_kg: float,
+    steps: int,
+    cadence_steps_min: float = 100.0,
+    walking_met: float = 3.5,
+) -> float:
+    """
+    Aproximación del gasto EXTRA asociado a pasos.
+
+    Al no disponer de velocidad/cadencia reales, asume ~100 pasos/min y
+    caminata moderada ~3.5 MET. Se resta 1 MET para no duplicar el reposo.
+    """
+    if steps <= 0 or cadence_steps_min <= 0:
+        return 0.0
+    minutes = float(steps) / cadence_steps_min
+    return kcal_from_met(weight_kg, minutes, walking_met, subtract_resting_met=True)
+
+
+def strength_expenditure_kcal(
+    weight_kg: float,
+    minutes: float,
+    intensity: str = "Moderado",
+) -> float:
+    met = STRENGTH_METS.get(intensity, STRENGTH_METS["Moderado"])
+    return kcal_from_met(weight_kg, minutes, met, subtract_resting_met=True)
+
+
+def daily_expenditure_with_activity(
+    weight_kg: float,
+    height_cm: float,
+    age: int,
+    sex: str,
+    steps: int = 0,
+    strength_minutes: float = 0.0,
+    strength_intensity: str = "Moderado",
+) -> Optional[dict]:
+    """
+    Gasto diario aproximado:
+      REE Mifflin-St Jeor x 1.20 (base sedentaria)
+      + gasto extra por pasos
+      + gasto extra por fuerza.
+
+    Usa una base sedentaria deliberadamente para evitar contar dos veces la
+    actividad cuando el usuario registra pasos y entrenamiento explícitamente.
+    """
+    ree = mifflin_st_jeor(weight_kg, height_cm, age, sex)
+    if ree is None:
+        return None
+
+    baseline = ree * 1.20
+    steps_kcal = steps_expenditure_kcal(weight_kg, int(steps or 0))
+    strength_kcal = strength_expenditure_kcal(
+        weight_kg,
+        float(strength_minutes or 0.0),
+        strength_intensity,
+    )
+    total = baseline + steps_kcal + strength_kcal
+
+    return {
+        "ree_kcal": float(ree),
+        "baseline_kcal": float(baseline),
+        "steps_kcal": float(steps_kcal),
+        "strength_kcal": float(strength_kcal),
+        "total_kcal": float(total),
+    }
+
+
+@dataclass
+class BehaviorProjection:
+    ready: bool
+    message: str
+    avg_intake_kcal: Optional[float] = None
+    avg_expenditure_kcal: Optional[float] = None
+    avg_deficit_kcal_day: Optional[float] = None
+    theoretical_pace_kg_week: Optional[float] = None
+    projected_date: Optional[date] = None
+    weeks_to_goal: Optional[float] = None
+
+
+def behavior_projection_from_energy_balance(
+    current_weight_kg: float,
+    goal_weight_kg: float,
+    avg_intake_kcal: float,
+    avg_expenditure_kcal: float,
+    as_of: Optional[date] = None,
+    min_valid_days: int = 4,
+    valid_days: int = 0,
+) -> BehaviorProjection:
+    """
+    Proyección secundaria basada en balance energético REGISTRADO.
+
+    Usa ~7.700 kcal/kg solo como aproximación operativa; no sustituye la
+    proyección principal basada en el peso observado y no modela adaptaciones
+    metabólicas individuales.
+    """
+    as_of = as_of or date.today()
+
+    if valid_days < min_valid_days:
+        return BehaviorProjection(
+            False,
+            f"Registra nutrición al menos {min_valid_days} días para activar la proyección por hábitos.",
+        )
+
+    if avg_expenditure_kcal <= 0 or avg_intake_kcal < 0:
+        return BehaviorProjection(False, "No hay datos energéticos suficientes para proyectar.")
+
+    deficit = avg_expenditure_kcal - avg_intake_kcal
+
+    if current_weight_kg <= goal_weight_kg:
+        return BehaviorProjection(
+            True,
+            "Objetivo alcanzado o superado.",
+            avg_intake_kcal=avg_intake_kcal,
+            avg_expenditure_kcal=avg_expenditure_kcal,
+            avg_deficit_kcal_day=deficit,
+            theoretical_pace_kg_week=0.0,
+            projected_date=as_of,
+            weeks_to_goal=0.0,
+        )
+
+    if deficit <= 100:
+        return BehaviorProjection(
+            True,
+            "El balance energético registrado no muestra un déficit suficiente para estimar descenso sostenido.",
+            avg_intake_kcal=avg_intake_kcal,
+            avg_expenditure_kcal=avg_expenditure_kcal,
+            avg_deficit_kcal_day=deficit,
+            theoretical_pace_kg_week=0.0,
+        )
+
+    pace = deficit * 7.0 / 7700.0
+    if pace <= 0:
+        return BehaviorProjection(
+            True,
+            "No es posible estimar una fecha con el balance actual.",
+            avg_intake_kcal=avg_intake_kcal,
+            avg_expenditure_kcal=avg_expenditure_kcal,
+            avg_deficit_kcal_day=deficit,
+            theoretical_pace_kg_week=pace,
+        )
+
+    weeks = (current_weight_kg - goal_weight_kg) / pace
+    projected = as_of + timedelta(days=int(round(weeks * 7.0)))
+
+    return BehaviorProjection(
+        True,
+        "Proyección secundaria basada en nutrición y actividad registradas.",
+        avg_intake_kcal=avg_intake_kcal,
+        avg_expenditure_kcal=avg_expenditure_kcal,
+        avg_deficit_kcal_day=deficit,
+        theoretical_pace_kg_week=pace,
+        projected_date=projected,
+        weeks_to_goal=weeks,
+    )
+
