@@ -656,6 +656,20 @@ def _latest_weight(measurements: pd.DataFrame) -> float | None:
     return float(row["weight_kg"])
 
 
+def _weight_on_or_before(measurements: pd.DataFrame, day: date) -> float | None:
+    """Devuelve el peso más cercano disponible en o antes del día solicitado."""
+    if measurements is None or measurements.empty:
+        return None
+    df = measurements.copy()
+    df["measured_on"] = pd.to_datetime(df["measured_on"]).dt.date
+    prior = df[df["measured_on"] <= day].sort_values("measured_on")
+    if not prior.empty:
+        return float(prior.iloc[-1]["weight_kg"])
+    # Si el usuario carga datos anteriores a su primera medición, usamos la primera
+    # medición conocida como aproximación en lugar de bloquear el registro.
+    return float(df.sort_values("measured_on").iloc[0]["weight_kg"])
+
+
 def _weekly_behavior_summary(sb, uid, profile, measurements, days=7):
     """
     Resume nutrición + pasos + fuerza para los últimos N días.
@@ -1274,35 +1288,39 @@ def weekly_due(df: pd.DataFrame) -> bool:
 
 
 def dashboard(sb, uid, profile, measurements):
+    """Inicio: progreso corporal y tendencia. Nutrición queda concentrada en su propia sección."""
     profile_email = str((profile or {}).get("email") or "")
     email_fallback = profile_email.split("@", 1)[0].replace(".", " ").replace("_", " ").strip().title()
     user_name = preferred_name(profile, email_fallback)
     st.markdown(f"## Hola, {html.escape(user_name)} 👋")
-    st.caption("Este es tu Journey de hoy.")
+    st.caption("Tu progreso corporal, tendencia y próxima acción en un solo lugar.")
 
     if measurements.empty:
         st.warning("No hay mediciones. Registra una para comenzar.")
-        support_card()
         return
+
     measurements = measurements.copy()
     measurements["measured_on"] = pd.to_datetime(measurements["measured_on"])
     last = measurements.sort_values("measured_on").iloc[-1]
+    last_day = pd.to_datetime(last["measured_on"]).date()
     projection = build_projection(measurements, float(profile["goal_weight_kg"]), float(profile["height_cm"]))
 
+    st.markdown("### Estado del Journey")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Peso actual", f"{float(last['weight_kg']):.1f} kg")
+    c2.metric("Meta", f"{float(profile['goal_weight_kg']):.1f} kg")
+    c3.metric("Progreso", f"{(projection.progress_pct or 0):.0f}%")
+    st.progress(min(max((projection.progress_pct or 0) / 100, 0.0), 1.0))
+    st.caption(f"Última medición: {last_day.strftime('%d-%m-%Y')}")
+
     if weekly_due(measurements):
-        st.warning("📏 Tu medición semanal está pendiente. Regístrala hoy para mantener la proyección actualizada.")
+        st.warning("📏 Tu medición semanal está pendiente. Puedes registrarla hoy o completar una fecha anterior si la olvidaste.")
     else:
         st.success("✅ Medición semanal al día.")
 
-    c1,c2,c3 = st.columns(3)
-    c1.metric("Peso", f"{float(last['weight_kg']):.1f} kg")
-    c2.metric("Meta", f"{float(profile['goal_weight_kg']):.1f} kg")
-    c3.metric("Progreso", f"{(projection.progress_pct or 0):.0f}%")
-
-    st.progress(min(max((projection.progress_pct or 0)/100, 0.0), 1.0))
-
+    st.markdown("### Tendencia")
     if projection.ready:
-        c1,c2 = st.columns(2)
+        c1, c2 = st.columns(2)
         pace_txt = "S/D" if projection.pace_kg_week is None else f"{projection.pace_kg_week:+.2f} kg/sem"
         c1.metric("Ritmo observado", pace_txt)
         c2.metric("Fecha estimada", projection.projected_date.strftime("%d-%m-%Y") if projection.projected_date else "Aún no estimable")
@@ -1316,34 +1334,29 @@ def dashboard(sb, uid, profile, measurements):
     else:
         st.info(projection.message)
 
-    # chart
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=measurements["measured_on"], y=measurements["weight_kg"], mode="lines+markers", name="Peso", line=dict(color="#111111", width=3), marker=dict(color="#111111", size=8)))
+    fig.add_trace(go.Scatter(
+        x=measurements["measured_on"], y=measurements["weight_kg"],
+        mode="lines+markers", name="Peso",
+        line=dict(color="#111111", width=3), marker=dict(color="#111111", size=8)
+    ))
     fig.add_hline(y=float(profile["goal_weight_kg"]), line_dash="dash", line_color="#777777", annotation_text="Meta")
     fig.update_layout(
-        height=320,
-        margin=dict(l=5,r=5,t=25,b=5),
-        legend_orientation="h",
-        yaxis_title="kg",
-        xaxis_title="",
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="#FAFAFA",
-        font=dict(color="#222222"),
+        height=320, margin=dict(l=5, r=5, t=25, b=5), legend_orientation="h",
+        yaxis_title="kg", xaxis_title="", paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="#FAFAFA", font=dict(color="#222222"),
         xaxis=dict(gridcolor="#E5E5E5", linecolor="#CFCFCF"),
         yaxis=dict(gridcolor="#E5E5E5", linecolor="#CFCFCF"),
     )
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
-    behavior_summary_card(sb, uid, profile, measurements)
-
-    st.markdown("### Medidas corporales")
-    c1,c2,c3,c4 = st.columns(4)
+    st.markdown("### Últimas medidas corporales")
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Pecho", f"{float(last['chest_cm']):.1f} cm")
     c2.metric("Cintura", f"{float(last['waist_cm']):.1f} cm")
     c3.metric("Cuello", f"{float(last['neck_cm']):.1f} cm")
     c4.metric("Cadera", f"{float(last['hip_cm']):.1f} cm")
     st.caption(f"IMC actual: {projection.bmi_current:.1f} · IMC en meta: {projection.bmi_goal:.1f}" if projection.bmi_current else "")
-    support_card()
     progress_photo_gallery(sb, measurements)
 
 
@@ -1355,7 +1368,7 @@ def measurement_form(sb, uid, measurements):
         for k in defaults:
             defaults[k] = float(row[k])
     with st.form("measure"):
-        day = st.date_input("Fecha", date.today())
+        day = st.date_input("Fecha de la medición", date.today(), max_value=date.today(), help="Puedes registrar hoy o completar una medición de un día anterior.")
         weight = st.number_input("Peso (kg)", 35.0, 300.0, defaults["weight_kg"], 0.1)
         c1,c2 = st.columns(2)
         with c1:
@@ -1388,7 +1401,6 @@ def measurement_form(sb, uid, measurements):
         st.success("Medición guardada.")
         st.rerun()
 
-    support_card()
 
 
 
@@ -1659,31 +1671,41 @@ def _meal_schedule_form(sb, uid, profile, key_prefix="meal_schedule", compact=Fa
 
 def nutrition_page(sb, uid, profile, measurements):
     st.markdown("## Nutrición y actividad")
-    st.caption(
-        "Registra lo que comiste y tu actividad del día. La IA, el gasto energético "
-        "y las proyecciones son estimaciones orientativas."
-    )
+    st.caption("Aquí se concentran alimentación, pasos, fuerza, balance diario y análisis semanal.")
 
     today = _local_now(profile).date()
-    last_weight = _latest_weight(measurements)
+    selected_day = st.date_input(
+        "Fecha que quieres registrar o revisar",
+        value=today,
+        max_value=today,
+        help="Si olvidaste registrar una comida o entrenamiento, selecciona aquí el día anterior correspondiente.",
+        key="nutrition_selected_day",
+    )
+    is_today = selected_day == today
+    day_label = "hoy" if is_today else selected_day.strftime("%d-%m-%Y")
+    last_weight = _weight_on_or_before(measurements, selected_day)
 
-    # Configuración horaria: imprescindible para interpretar un déficit "hasta ahora".
-    _meal_schedule_form(sb, uid, profile, key_prefix="nutrition_meal_schedule", compact=True)
-    st.divider()
+    schedule = _meal_window(profile)
+    if not schedule["configured"]:
+        with st.expander("⚙️ Configurar horario de alimentación", expanded=True):
+            _meal_schedule_form(sb, uid, profile, key_prefix="nutrition_meal_schedule", compact=True)
+    else:
+        fasting_txt = " · ayuno intermitente" if schedule.get("fasting") else ""
+        st.caption(
+            f"Horario habitual: {schedule['start'].strftime('%H:%M')}–{schedule['end'].strftime('%H:%M')}{fasting_txt}. "
+            "Puedes cambiarlo en Ajustes."
+        )
 
-    # --------------------------
-    # Actividad del día
-    # --------------------------
-    st.markdown("### Actividad de hoy")
-    today_activity = load_activity(sb, uid, today)
+    # Datos existentes para el día seleccionado
+    day_activity = load_activity(sb, uid, selected_day)
+    logs = load_nutrition(sb, uid, selected_day)
 
     current_steps = 0
     current_strength = 0
     current_intensity = "Moderado"
     current_notes = ""
-
-    if not today_activity.empty:
-        arow = today_activity.iloc[-1]
+    if not day_activity.empty:
+        arow = day_activity.iloc[-1]
         current_steps = int(arow.get("steps") or 0)
         current_strength = int(arow.get("strength_minutes") or 0)
         current_intensity = arow.get("strength_intensity") or "Moderado"
@@ -1693,254 +1715,215 @@ def nutrition_page(sb, uid, profile, measurements):
     if current_intensity not in intensity_options:
         current_intensity = "Moderado"
 
-    with st.form("daily_activity_form"):
-        c1, c2 = st.columns(2)
-        with c1:
-            steps = st.number_input(
-                "Pasos del día",
-                min_value=0,
-                max_value=100000,
-                value=current_steps,
-                step=500,
-            )
-        with c2:
-            strength_minutes = st.number_input(
-                "Entrenamiento de fuerza (min)",
-                min_value=0,
-                max_value=600,
-                value=current_strength,
-                step=5,
-            )
+    # Resumen arriba: primero ver, luego editar/registrar.
+    st.markdown(f"### Resumen · {day_label}")
+    total_kcal = float(logs["calories_kcal"].fillna(0).sum()) if not logs.empty else 0.0
+    total_protein = float(logs["protein_g"].fillna(0).sum()) if not logs.empty else 0.0
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Calorías", f"{total_kcal:.0f} kcal")
+    c2.metric("Proteína", f"{total_protein:.0f} g")
+    c3.metric("Pasos", f"{current_steps:,}".replace(",", "."))
+    c4.metric("Fuerza", f"{current_strength} min")
 
-        strength_intensity = st.selectbox(
-            "Intensidad de fuerza",
-            intensity_options,
-            index=intensity_options.index(current_intensity),
-            help="Suave, moderado o intenso. Se usa para estimar gasto, no para calificar el entrenamiento.",
-        )
-        activity_notes = st.text_input(
-            "Notas de actividad (opcional)",
-            value=current_notes,
-            placeholder="Ej.: piernas, torso, caminata larga, etc.",
-        )
-        save_activity = st.form_submit_button("Guardar actividad de hoy", use_container_width=True)
+    if logs.empty and day_activity.empty:
+        st.info(f"Aún no hay registros para {day_label}. Puedes completarlos en las secciones siguientes.")
 
-    if save_activity:
-        sb.table("daily_activity").upsert(
-            {
-                "user_id": uid,
-                "activity_date": str(today),
-                "steps": int(steps),
-                "strength_minutes": int(strength_minutes),
-                "strength_intensity": strength_intensity,
-                "notes": activity_notes,
-            },
-            on_conflict="user_id,activity_date",
-        ).execute()
-        st.success("Actividad del día guardada.")
-        st.rerun()
-
-    # Gasto del día con pasos + fuerza explícitos
-    if last_weight:
-        activity_estimate = daily_expenditure_with_activity(
-            weight_kg=last_weight,
-            height_cm=float(profile["height_cm"]),
-            age=int(profile["age"]),
-            sex=profile.get("sex") or "",
-            steps=current_steps,
-            strength_minutes=current_strength,
-            strength_intensity=current_intensity,
-        )
-
-        if activity_estimate:
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Gasto base", f"{activity_estimate['baseline_kcal']:.0f} kcal")
-            c2.metric(
-                "Actividad extra",
-                f"{activity_estimate['steps_kcal'] + activity_estimate['strength_kcal']:.0f} kcal",
-            )
-            c3.metric("Gasto total estimado", f"{activity_estimate['total_kcal']:.0f} kcal")
-            st.caption(
-                f"Pasos ≈ {activity_estimate['steps_kcal']:.0f} kcal extra · "
-                f"Fuerza ≈ {activity_estimate['strength_kcal']:.0f} kcal extra. "
-                "Se usa una base sedentaria para reducir doble conteo."
-            )
-        else:
-            fallback_tdee = tdee_estimate(
-                last_weight,
-                float(profile["height_cm"]),
-                int(profile["age"]),
-                profile.get("sex") or "",
-                profile.get("activity_level") or "Sedentario",
-            )
-            if fallback_tdee:
-                st.info(
-                    f"Gasto diario estimado por perfil: **{fallback_tdee:.0f} kcal/día**. "
-                    "Para usar pasos y fuerza en el cálculo más detallado, indica sexo en el perfil."
-                )
-
-    # --------------------------
-    # Registro de comida
-    # --------------------------
-    st.markdown("### Registrar comida")
-    text = st.text_area(
-        "¿Qué comiste?",
-        placeholder="Ej.: 200 g de pechuga de pollo, 1 taza de arroz, ensalada y un yogur",
-    )
+    tab_food, tab_activity, tab_analysis = st.tabs(["🥗 Comidas", "🏋️ Actividad", "📊 Análisis"])
 
     gemini_key = st.secrets.get("GEMINI_API_KEY", "")
     openrouter_key = st.secrets.get("OPENROUTER_API_KEY", "")
     ai_enabled = bool(gemini_key or openrouter_key)
 
-    c1,c2 = st.columns(2)
-    with c1:
-        if st.button("Estimar con IA", use_container_width=True, disabled=not ai_enabled):
-            if not text.strip():
-                st.warning("Escribe una comida primero.")
+    with tab_food:
+        st.markdown(f"### Registrar comida · {day_label}")
+        text = st.text_area(
+            "¿Qué comiste?",
+            placeholder="Ej.: 200 g de pechuga de pollo, 1 taza de arroz, ensalada y un yogur",
+            key=f"food_text_{selected_day}",
+        )
+
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("Estimar con IA", use_container_width=True, disabled=not ai_enabled, key=f"estimate_food_{selected_day}"):
+                if not text.strip():
+                    st.warning("Escribe una comida primero.")
+                else:
+                    try:
+                        with st.spinner("Analizando comida..."):
+                            est = estimate_nutrition(
+                                food_text=text,
+                                gemini_api_key=gemini_key,
+                                gemini_model=st.secrets.get("GEMINI_MODEL", "gemini-3.6-flash"),
+                                openrouter_api_key=openrouter_key,
+                                openrouter_model=st.secrets.get("OPENROUTER_MODEL", "openrouter/free"),
+                            )
+                        st.session_state[f"ai_food_{selected_day}"] = est
+                        st.success("Estimación completada.")
+                    except Exception as e:
+                        st.error(f"No fue posible estimar: {e}")
+        with c2:
+            if ai_enabled:
+                providers = []
+                if gemini_key:
+                    providers.append("Gemini")
+                if openrouter_key:
+                    providers.append("OpenRouter")
+                st.caption("IA disponible · " + " + ".join(providers))
             else:
-                try:
-                    with st.spinner("Analizando comida..."):
-                        est = estimate_nutrition(
-                            food_text=text,
-                            gemini_api_key=gemini_key,
-                            gemini_model=st.secrets.get("GEMINI_MODEL", "gemini-3.6-flash"),
-                            openrouter_api_key=openrouter_key,
-                            openrouter_model=st.secrets.get("OPENROUTER_MODEL", "openrouter/free"),
-                        )
-                    st.session_state.ai_food = est
-                    st.success("Estimación completada.")
-                except Exception as e:
-                    st.error(f"No fue posible estimar: {e}")
+                st.caption("Configura GEMINI_API_KEY u OPENROUTER_API_KEY para usar IA")
 
-    with c2:
-        if ai_enabled:
-            providers = []
-            if gemini_key:
-                providers.append("Gemini")
-            if openrouter_key:
-                providers.append("OpenRouter")
-            st.caption("IA disponible · " + " + ".join(providers))
-        else:
-            st.caption("Configura GEMINI_API_KEY u OPENROUTER_API_KEY para usar IA")
+        est = st.session_state.get(f"ai_food_{selected_day}", {})
+        with st.form(f"food_{selected_day}"):
+            calories = st.number_input("Calorías (kcal)", 0, 10000, int(est.get("calories_kcal", 0) or 0), key=f"calories_{selected_day}")
+            protein = st.number_input("Proteína (g)", 0.0, 1000.0, float(est.get("protein_g", 0) or 0), 1.0, key=f"protein_{selected_day}")
+            carbs = st.number_input("Carbohidratos (g)", 0.0, 1500.0, float(est.get("carbs_g", 0) or 0), 1.0, key=f"carbs_{selected_day}")
+            fat = st.number_input("Grasas (g)", 0.0, 1000.0, float(est.get("fat_g", 0) or 0), 1.0, key=f"fat_{selected_day}")
+            if est.get("summary"):
+                st.caption(est["summary"])
+            if est.get("provider"):
+                st.caption(f"Proveedor IA: {est['provider']} · Confianza estimada: {est.get('confidence','media')}")
+            save_food = st.form_submit_button(f"Agregar comida a {day_label}", use_container_width=True)
 
-    est = st.session_state.get("ai_food", {})
-    with st.form("food"):
-        calories = st.number_input("Calorías (kcal)", 0, 10000, int(est.get("calories_kcal",0) or 0))
-        protein = st.number_input("Proteína (g)", 0.0, 1000.0, float(est.get("protein_g",0) or 0), 1.0)
-        carbs = st.number_input("Carbohidratos (g)", 0.0, 1500.0, float(est.get("carbs_g",0) or 0), 1.0)
-        fat = st.number_input("Grasas (g)", 0.0, 1000.0, float(est.get("fat_g",0) or 0), 1.0)
-        if est.get("summary"):
-            st.caption(est["summary"])
-        if est.get("provider"):
-            st.caption(
-                f"Proveedor IA: {est['provider']} · "
-                f"Confianza estimada: {est.get('confidence','media')}"
-            )
-        save_food = st.form_submit_button("Agregar al día", use_container_width=True)
-
-    if save_food:
-        sb.table("nutrition_logs").insert(
-            {
+        if save_food:
+            sb.table("nutrition_logs").insert({
                 "user_id": uid,
-                "logged_on": str(today),
+                "logged_on": str(selected_day),
                 "description": text or "Registro manual",
                 "calories_kcal": int(calories),
                 "protein_g": float(protein),
                 "carbs_g": float(carbs),
                 "fat_g": float(fat),
                 "ai_estimated": bool(est),
-            }
-        ).execute()
-        st.session_state.pop("ai_food", None)
-        st.session_state["refresh_daily_coach"] = True
-        st.rerun()
+            }).execute()
+            st.session_state.pop(f"ai_food_{selected_day}", None)
+            if is_today:
+                st.session_state["refresh_daily_coach"] = True
+            st.toast(f"Comida guardada en {day_label}.", icon="✅")
+            st.rerun()
 
-    logs = load_nutrition(sb, uid, today)
-    if not logs.empty:
-        st.markdown("### Resumen de hoy")
-        c1,c2,c3 = st.columns(3)
-        total_kcal = float(logs["calories_kcal"].fillna(0).sum())
-        total_protein = float(logs["protein_g"].fillna(0).sum())
-        c1.metric("Calorías", f"{total_kcal:.0f} kcal")
-        c2.metric("Proteína", f"{total_protein:.0f} g")
+        logs = load_nutrition(sb, uid, selected_day)
+        if not logs.empty:
+            st.markdown("#### Comidas registradas")
+            st.dataframe(
+                logs[["description", "calories_kcal", "protein_g", "carbs_g", "fat_g"]],
+                use_container_width=True,
+                hide_index=True,
+            )
 
-        today_activity = load_activity(sb, uid, today)
-        steps_today = int(today_activity.iloc[-1]["steps"]) if not today_activity.empty else 0
-        c3.metric("Pasos", f"{steps_today:,}".replace(",", "."))
+    with tab_activity:
+        st.markdown(f"### Actividad · {day_label}")
+        with st.form(f"daily_activity_form_{selected_day}"):
+            c1, c2 = st.columns(2)
+            with c1:
+                steps = st.number_input("Pasos del día", 0, 100000, current_steps, 500, key=f"steps_{selected_day}")
+            with c2:
+                strength_minutes = st.number_input("Entrenamiento de fuerza (min)", 0, 600, current_strength, 5, key=f"strength_{selected_day}")
+            strength_intensity = st.selectbox(
+                "Intensidad de fuerza", intensity_options,
+                index=intensity_options.index(current_intensity),
+                help="Se usa para estimar gasto; no califica la calidad del entrenamiento.",
+                key=f"intensity_{selected_day}",
+            )
+            activity_notes = st.text_input(
+                "Notas de actividad (opcional)", value=current_notes,
+                placeholder="Ej.: piernas, torso, caminata larga, etc.",
+                key=f"activity_notes_{selected_day}",
+            )
+            save_activity = st.form_submit_button(f"Guardar actividad de {day_label}", use_container_width=True)
 
-        st.dataframe(
-            logs[["description","calories_kcal","protein_g","carbs_g","fat_g"]],
-            use_container_width=True,
-            hide_index=True,
-        )
+        if save_activity:
+            sb.table("daily_activity").upsert({
+                "user_id": uid,
+                "activity_date": str(selected_day),
+                "steps": int(steps),
+                "strength_minutes": int(strength_minutes),
+                "strength_intensity": strength_intensity,
+                "notes": activity_notes,
+            }, on_conflict="user_id,activity_date").execute()
+            if is_today:
+                st.session_state["refresh_daily_coach"] = True
+            st.toast(f"Actividad guardada en {day_label}.", icon="✅")
+            st.rerun()
 
-        # Balance diario + coach IA
-        activity_row = today_activity.iloc[-1].to_dict() if not today_activity.empty else {}
-        exp_today = None
         if last_weight:
-            exp_detail = daily_expenditure_with_activity(
+            activity_estimate = daily_expenditure_with_activity(
                 weight_kg=last_weight,
                 height_cm=float(profile["height_cm"]),
                 age=int(profile["age"]),
                 sex=profile.get("sex") or "",
-                steps=int(activity_row.get("steps") or 0),
-                strength_minutes=int(activity_row.get("strength_minutes") or 0),
-                strength_intensity=activity_row.get("strength_intensity") or "Moderado",
+                steps=current_steps,
+                strength_minutes=current_strength,
+                strength_intensity=current_intensity,
             )
-            if exp_detail:
-                exp_today = float(exp_detail["total_kcal"])
-            else:
-                exp_today = tdee_estimate(
-                    last_weight,
-                    float(profile["height_cm"]),
-                    int(profile["age"]),
-                    profile.get("sex") or "",
-                    profile.get("activity_level") or "Sedentario",
+            if activity_estimate:
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Gasto base", f"{activity_estimate['baseline_kcal']:.0f} kcal")
+                c2.metric("Actividad extra", f"{activity_estimate['steps_kcal'] + activity_estimate['strength_kcal']:.0f} kcal")
+                c3.metric("Gasto total", f"{activity_estimate['total_kcal']:.0f} kcal")
+
+    with tab_analysis:
+        logs = load_nutrition(sb, uid, selected_day)
+        day_activity = load_activity(sb, uid, selected_day)
+        activity_row = day_activity.iloc[-1].to_dict() if not day_activity.empty else {}
+
+        if logs.empty:
+            st.info("Registra al menos una comida para calcular el balance nutricional de este día.")
+        else:
+            exp_day = None
+            if last_weight:
+                exp_detail = daily_expenditure_with_activity(
+                    weight_kg=last_weight,
+                    height_cm=float(profile["height_cm"]),
+                    age=int(profile["age"]),
+                    sex=profile.get("sex") or "",
+                    steps=int(activity_row.get("steps") or 0),
+                    strength_minutes=int(activity_row.get("strength_minutes") or 0),
+                    strength_intensity=activity_row.get("strength_intensity") or "Moderado",
+                )
+                exp_day = float(exp_detail["total_kcal"]) if exp_detail else tdee_estimate(
+                    last_weight, float(profile["height_cm"]), int(profile["age"]),
+                    profile.get("sex") or "", profile.get("activity_level") or "Sedentario"
                 )
 
-        coach_context = _daily_coach_context(
-            logs, profile, last_weight, exp_today, activity_row=activity_row
+            coach_context = _daily_coach_context(logs, profile, last_weight, exp_day, activity_row=activity_row)
+            if coach_context and not is_today:
+                # Un día pasado se analiza como día cerrado; no usamos la hora actual para juzgarlo.
+                coach_context["meal_window_status"] = "after"
+                coach_context["meal_window_elapsed_pct"] = 100.0
+                coach_context["current_local_time"] = "23:59"
+
+            coach_key = f"daily_coach_result_{selected_day}"
+            coach_result = st.session_state.get(coach_key)
+            auto_refresh = is_today and bool(st.session_state.pop("refresh_daily_coach", False))
+            analyze_now = auto_refresh
+            if ai_enabled and coach_context and not auto_refresh:
+                button_label = "🤖 Actualizar análisis de hoy y menú de mañana" if is_today else "🤖 Analizar este día"
+                if st.button(button_label, use_container_width=True, key=f"analyze_{selected_day}"):
+                    analyze_now = True
+
+            if analyze_now and ai_enabled and coach_context:
+                try:
+                    with st.spinner("Analizando comidas, actividad y balance..."):
+                        coach_result = analyze_daily_balance(
+                            context=coach_context,
+                            gemini_api_key=gemini_key,
+                            gemini_model=st.secrets.get("GEMINI_MODEL", "gemini-3.6-flash"),
+                            openrouter_api_key=openrouter_key,
+                            openrouter_model=st.secrets.get("OPENROUTER_MODEL", "openrouter/free"),
+                        )
+                    st.session_state[coach_key] = coach_result
+                except Exception as exc:
+                    st.warning(f"No fue posible generar el análisis IA: {exc}")
+
+            _render_ai_daily_coach(coach_context, coach_result)
+
+        st.divider()
+        behavior_summary_card(sb, uid, profile, measurements)
+        st.caption(
+            "El resumen de 7 días vive aquí para evitar duplicar información con Inicio. "
+            "La proyección principal de peso sigue basándose en tus mediciones reales."
         )
 
-        coach_result = st.session_state.get("daily_coach_result")
-        coach_day = st.session_state.get("daily_coach_day")
-        if coach_day != str(today):
-            coach_result = None
-
-        auto_refresh = bool(st.session_state.pop("refresh_daily_coach", False))
-        analyze_now = False
-        if ai_enabled and coach_context:
-            if auto_refresh:
-                analyze_now = True
-            elif st.button("🤖 Actualizar análisis, recomendación y menú de mañana", use_container_width=True):
-                analyze_now = True
-
-        if analyze_now:
-            try:
-                with st.spinner("Analizando comidas, actividad y balance del día..."):
-                    coach_result = analyze_daily_balance(
-                        context=coach_context,
-                        gemini_api_key=gemini_key,
-                        gemini_model=st.secrets.get("GEMINI_MODEL", "gemini-3.6-flash"),
-                        openrouter_api_key=openrouter_key,
-                        openrouter_model=st.secrets.get("OPENROUTER_MODEL", "openrouter/free"),
-                    )
-                st.session_state["daily_coach_result"] = coach_result
-                st.session_state["daily_coach_day"] = str(today)
-            except Exception as exc:
-                st.warning(f"No fue posible generar el análisis IA del día: {exc}")
-
-        _render_ai_daily_coach(coach_context, coach_result)
-
-    behavior_summary_card(sb, uid, profile, measurements)
-
-    st.caption(
-        "La proyección por hábitos usa los días con nutrición registrada y estima el gasto "
-        "a partir de Mifflin–St Jeor, una base sedentaria y la actividad explícita. "
-        "No sustituye la tendencia real de peso."
-    )
-
-    support_card()
 
 def settings_page(sb, uid, profile):
     st.markdown("## Ajustes")

@@ -1,18 +1,19 @@
-name: Weekly measurement reminders
+name: Virgils Journey reminders
+
 on:
   schedule:
-    - cron: '0 12 * * *'
+    - cron: "0 * * * *"
   workflow_dispatch:
 
 jobs:
-  remind:
+  reminders:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-      - run: pip install supabase requests
+          python-version: "3.12"
+      - run: pip install requests supabase
       - run: python reminder.py
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
