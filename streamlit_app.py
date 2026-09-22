@@ -718,9 +718,10 @@ def _weekly_behavior_summary(sb, uid, profile, measurements, days=7):
         steps = int(act.get("steps") or 0)
         strength_minutes = float(act.get("strength_minutes") or 0)
         strength_intensity = act.get("strength_intensity") or "Moderado"
+        weight_for_day = _weight_on_or_before(measurements, d) or current_weight
 
         expenditure = daily_expenditure_with_activity(
-            weight_kg=current_weight,
+            weight_kg=weight_for_day,
             height_cm=float(profile["height_cm"]),
             age=int(profile["age"]),
             sex=sex,
@@ -730,33 +731,42 @@ def _weekly_behavior_summary(sb, uid, profile, measurements, days=7):
         )
 
         # Si no se indicó sexo no podemos aplicar Mifflin-St Jeor por sexo.
-        # En ese caso usamos el TDEE clásico del perfil como aproximación.
+        # En ese caso usamos el TDEE clásico del perfil como aproximación y no
+        # intentamos separar artificialmente gasto base de actividad.
         if expenditure is None:
             fallback = tdee_estimate(
-                current_weight,
+                weight_for_day,
                 float(profile["height_cm"]),
                 int(profile["age"]),
                 sex,
                 profile.get("activity_level") or "Sedentario",
             )
             total_exp = float(fallback) if fallback else None
+            baseline_kcal = total_exp
             steps_kcal = None
             strength_kcal = None
+            activity_extra_kcal = None
         else:
             total_exp = expenditure["total_kcal"]
+            baseline_kcal = expenditure["baseline_kcal"]
             steps_kcal = expenditure["steps_kcal"]
             strength_kcal = expenditure["strength_kcal"]
+            activity_extra_kcal = steps_kcal + strength_kcal
 
+        calories = float(food["calories_kcal"])
         rows.append({
             "day": d,
-            "calories_kcal": float(food["calories_kcal"]),
+            "calories_kcal": calories,
             "protein_g": float(food["protein_g"]),
             "steps": steps,
             "strength_minutes": strength_minutes,
             "strength_intensity": strength_intensity,
             "expenditure_kcal": total_exp,
+            "baseline_kcal": baseline_kcal,
+            "activity_extra_kcal": activity_extra_kcal,
             "steps_kcal": steps_kcal,
             "strength_kcal": strength_kcal,
+            "deficit_kcal": (total_exp - calories) if total_exp is not None else None,
             "activity_logged": d in activity_by_day,
         })
 
@@ -830,6 +840,103 @@ def _metric_card(label, value, note=""):
     )
 
 
+def _render_weekly_energy_chart(summary, profile):
+    """Gráfico diario de gasto base, actividad extra y déficit energético registrado."""
+    if not summary:
+        return
+
+    days = summary.get("days")
+    if days is None or days.empty:
+        return
+
+    df = days.copy().sort_values("day")
+    if "baseline_kcal" not in df.columns or "deficit_kcal" not in df.columns:
+        return
+
+    # El déficit solo se muestra cuando existe nutrición registrada. No asumimos
+    # 0 kcal en días sin comidas porque produciría déficits ficticios.
+    df["day_label"] = pd.to_datetime(df["day"]).dt.strftime("%d-%m")
+    df["activity_extra_kcal"] = pd.to_numeric(df.get("activity_extra_kcal"), errors="coerce").fillna(0.0)
+    df["baseline_kcal"] = pd.to_numeric(df.get("baseline_kcal"), errors="coerce")
+    df["deficit_kcal"] = pd.to_numeric(df.get("deficit_kcal"), errors="coerce")
+
+    # El objetivo puede variar levemente con el gasto estimado de cada día.
+    target_deficits = []
+    for _, row in df.iterrows():
+        exp = row.get("expenditure_kcal")
+        target = _daily_targets(profile, None, exp) if pd.notna(exp) else None
+        target_deficits.append(target.get("target_deficit_kcal") if target else None)
+    df["target_deficit_kcal"] = target_deficits
+
+    st.markdown("### Balance energético · día a día")
+    st.caption(
+        "Las barras muestran el gasto base estimado y la actividad extra registrada; "
+        "la línea muestra el déficit calórico logrado. El día actual puede ser provisional hasta cerrar tu ventana de comidas."
+    )
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=df["day_label"],
+        y=df["baseline_kcal"],
+        name="Gasto base",
+        marker_color="#6E6E6E",
+        hovertemplate="%{x}<br>Gasto base: %{y:.0f} kcal<extra></extra>",
+    ))
+    fig.add_trace(go.Bar(
+        x=df["day_label"],
+        y=df["activity_extra_kcal"],
+        name="Actividad extra",
+        marker_color="#9B7BFF",
+        hovertemplate="%{x}<br>Actividad extra: %{y:.0f} kcal<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=df["day_label"],
+        y=df["deficit_kcal"],
+        name="Déficit logrado",
+        mode="lines+markers+text",
+        line=dict(color="#111111", width=3),
+        marker=dict(color="#111111", size=8),
+        text=[f"{v:.0f}" if pd.notna(v) else "" for v in df["deficit_kcal"]],
+        textposition="top center",
+        hovertemplate="%{x}<br>Déficit: %{y:.0f} kcal<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=df["day_label"],
+        y=df["target_deficit_kcal"],
+        name="Déficit objetivo",
+        mode="lines",
+        line=dict(color="#B0B0B0", width=2, dash="dash"),
+        hovertemplate="%{x}<br>Objetivo: %{y:.0f} kcal<extra></extra>",
+    ))
+
+    fig.update_layout(
+        barmode="stack",
+        height=390,
+        margin=dict(l=5, r=5, t=20, b=5),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        yaxis_title="kcal",
+        xaxis_title="",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="#FAFAFA",
+        font=dict(color="#222222"),
+        xaxis=dict(gridcolor="#EEEEEE", linecolor="#CFCFCF"),
+        yaxis=dict(gridcolor="#E5E5E5", linecolor="#CFCFCF", rangemode="tozero"),
+        hovermode="x unified",
+    )
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+    # Resumen rápido del período para lectura ejecutiva.
+    valid = df[df["deficit_kcal"].notna()]
+    if not valid.empty:
+        avg_def = float(valid["deficit_kcal"].mean())
+        avg_extra = float(valid["activity_extra_kcal"].mean())
+        total_extra = float(valid["activity_extra_kcal"].sum())
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Déficit medio", f"{avg_def:.0f} kcal/día")
+        c2.metric("Actividad extra media", f"{avg_extra:.0f} kcal/día")
+        c3.metric("Actividad extra 7 días", f"{total_extra:.0f} kcal")
+
+
 def behavior_summary_card(sb, uid, profile, measurements):
     summary = _weekly_behavior_summary(sb, uid, profile, measurements, days=7)
 
@@ -861,6 +968,8 @@ def behavior_summary_card(sb, uid, profile, measurements):
         f"Actividad registrada: {summary.get('valid_activity_days', 0)}/7 días. "
         "El día actual no se mezcla con el promedio hasta que termina tu rango habitual de comidas."
     )
+
+    _render_weekly_energy_chart(summary, profile)
 
     timing = summary.get("meal_timing") or _meal_window_status(profile)
     today_deficit = summary.get("today_deficit_so_far")
