@@ -1867,7 +1867,16 @@ def nutrition_page(sb, uid, profile, measurements):
                                 openrouter_model=st.secrets.get("OPENROUTER_MODEL", "openrouter/free"),
                             )
                         st.session_state[f"ai_food_{selected_day}"] = est
-                        st.success("Estimación completada.")
+                        # IMPORTANTE: los number_input con key propia conservan su valor
+                        # en session_state y no adoptan automáticamente el nuevo `value`.
+                        # Sincronizamos explícitamente la estimación IA con los campos
+                        # visibles para que calorías y macronutrientes se actualicen.
+                        st.session_state[f"calories_{selected_day}"] = int(est.get("calories_kcal", 0) or 0)
+                        st.session_state[f"protein_{selected_day}"] = float(est.get("protein_g", 0) or 0)
+                        st.session_state[f"carbs_{selected_day}"] = float(est.get("carbs_g", 0) or 0)
+                        st.session_state[f"fat_{selected_day}"] = float(est.get("fat_g", 0) or 0)
+                        st.success("Estimación completada. Valores actualizados.")
+                        st.rerun()
                     except Exception as e:
                         st.error(f"No fue posible estimar: {e}")
         with c2:
@@ -1905,6 +1914,16 @@ def nutrition_page(sb, uid, profile, measurements):
                 "ai_estimated": bool(est),
             }).execute()
             st.session_state.pop(f"ai_food_{selected_day}", None)
+            # Limpiar el formulario para que la siguiente comida no reutilice
+            # calorías/macros de la comida recién guardada.
+            for _key in (
+                f"calories_{selected_day}",
+                f"protein_{selected_day}",
+                f"carbs_{selected_day}",
+                f"fat_{selected_day}",
+                f"food_text_{selected_day}",
+            ):
+                st.session_state.pop(_key, None)
             if is_today:
                 st.session_state["refresh_daily_coach"] = True
             st.toast(f"Comida guardada en {day_label}.", icon="✅")
